@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, EventStream, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -16,10 +16,13 @@ use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
+use tui_textarea::TextArea;
 
 use crate::app::{App, AppEvent};
 use crate::config::Config;
 use crate::ui;
+
+type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 
 pub async fn run(config: Config) -> Result<()> {
     enable_raw_mode()?;
@@ -42,7 +45,7 @@ pub async fn run(config: Config) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, config).await;
+    let result = run_app(&mut terminal, config, enhanced_keys).await;
 
     if enhanced_keys {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
@@ -54,22 +57,27 @@ pub async fn run(config: Config) -> Result<()> {
     result
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    config: Config,
-) -> Result<()> {
+fn is_ctrl_e(key: &crossterm::event::KeyEvent) -> bool {
+    key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+async fn run_app(terminal: &mut Term, config: Config, enhanced_keys: bool) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
     let mut app = App::new(config, tx);
     let mut term_events = EventStream::new();
 
-    terminal.draw(|f| ui::draw(f, &app))?;
+    terminal.draw(|f| ui::draw(f, &mut app))?;
 
     loop {
         tokio::select! {
             maybe_ev = term_events.next().fuse() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        app.on_app_event(AppEvent::Key(key));
+                        if is_ctrl_e(&key) && app.overlay.is_none() {
+                            edit_in_external_editor(terminal, &mut app, enhanced_keys).await?;
+                        } else {
+                            app.on_app_event(AppEvent::Key(key));
+                        }
                     }
                     Some(Ok(Event::Resize(_, _))) => {
                         app.on_app_event(AppEvent::Resize);
@@ -91,8 +99,63 @@ async fn run_app(
         if app.quit {
             break;
         }
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal.draw(|f| ui::draw(f, &mut app))?;
     }
 
+    Ok(())
+}
+
+/// Suspends the TUI, opens the editor's SQL in `$EDITOR` (falling back to
+/// `vi`), and reloads whatever was saved back into the editor pane.
+async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_keys: bool) -> Result<()> {
+    let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let tmp_path = std::env::temp_dir().join(format!("sqldr-{}.sql", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp_path, app.editor.lines().join("\n")) {
+        app.status = crate::app::StatusMessage::Error(format!("no se pudo crear archivo temporal: {e}"));
+        return Ok(());
+    }
+
+    if enhanced_keys {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    let status = tokio::process::Command::new(&editor_cmd).arg(&tmp_path).status().await;
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    if enhanced_keys {
+        execute!(
+            terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
+    terminal.clear()?;
+
+    match status {
+        Ok(exit) if exit.success() => match std::fs::read_to_string(&tmp_path) {
+            Ok(content) => {
+                let lines: Vec<String> = content.lines().map(String::from).collect();
+                app.editor = TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+                app.editor.move_cursor(tui_textarea::CursorMove::Bottom);
+                app.editor.move_cursor(tui_textarea::CursorMove::End);
+                app.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+                app.status = crate::app::StatusMessage::Info(format!("editado en {editor_cmd}"));
+            }
+            Err(e) => {
+                app.status = crate::app::StatusMessage::Error(format!("no se pudo leer de vuelta: {e}"));
+            }
+        },
+        Ok(_) => {
+            app.status = crate::app::StatusMessage::Info(format!("{editor_cmd} salió sin guardar"));
+        }
+        Err(e) => {
+            app.status = crate::app::StatusMessage::Error(format!("no se pudo ejecutar '{editor_cmd}': {e}"));
+        }
+    }
+
+    let _ = std::fs::remove_file(&tmp_path);
     Ok(())
 }

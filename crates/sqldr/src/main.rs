@@ -1,4 +1,5 @@
 mod app;
+mod clipboard;
 mod config;
 mod tui;
 mod ui;
@@ -62,6 +63,10 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
         );
     }
 
+    if sqldr_core::needs_where_confirmation(sql) && !confirm_where(sql)? {
+        anyhow::bail!("cancelado por el usuario");
+    }
+
     let conn_cfg = ConnConfig {
         name: entry.name.clone(),
         url,
@@ -83,6 +88,19 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
     Ok(())
 }
 
+/// Prompts on stderr for a `y`/`N` confirmation before running an
+/// `UPDATE`/`DELETE` without a `WHERE` clause. Returns `false` on anything
+/// but an explicit "y" (including EOF, e.g. non-interactive stdin).
+fn confirm_where(sql: &str) -> Result<bool> {
+    use std::io::Write;
+    eprintln!("Sin WHERE — ¿ejecutar de todas formas?\n{sql}");
+    eprint!("Escribí 'y' para confirmar: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
+}
+
 async fn run_conn(action: ConnAction) -> Result<()> {
     match action {
         ConnAction::SetPassword { name, password } => {
@@ -96,7 +114,6 @@ async fn run_conn(action: ConnAction) -> Result<()> {
         }
     }
 }
-
 
 fn print_rows(rows: &[Row]) {
     let Some(first) = rows.first() else {

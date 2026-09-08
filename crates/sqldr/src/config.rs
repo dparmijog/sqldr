@@ -27,6 +27,18 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(dirs.config_dir().join("config.toml"))
 }
 
+/// Path to the on-disk history file for a connection, sanitizing the name
+/// into a safe filename component (no path traversal via connection names).
+pub fn history_path(conn_name: &str) -> Result<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "sqldr")
+        .context("could not determine data directory")?;
+    let safe_name: String = conn_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    Ok(dirs.data_dir().join("history").join(format!("{safe_name}.jsonl")))
+}
+
 pub fn load() -> Result<Config> {
     let path = config_path()?;
     if !path.exists() {

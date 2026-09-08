@@ -1,9 +1,10 @@
 //! Global TUI state and the event loop that drives it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sqldr_core::{is_mutating, Driver, MySqlDriver, Row, Schema};
+use sqldr_core::{is_mutating, needs_where_confirmation, Driver, History, MySqlDriver, Row, Schema};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
@@ -78,13 +79,28 @@ pub enum SidebarNode {
 pub struct ResultsState {
     pub rows: Vec<Row>,
     pub cols: Vec<String>,
-    pub scroll: usize,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    /// Top row currently visible; kept in sync with `cursor_row` by the
+    /// results renderer so the selection never scrolls off-screen.
+    pub scroll_top: usize,
     pub running: bool,
+    /// `(database, table)` this result set was previewed from, if any.
+    /// Enables "copy row as INSERT" (needs a concrete target table).
+    pub source_table: Option<(String, String)>,
 }
 
 impl Default for ResultsState {
     fn default() -> Self {
-        ResultsState { rows: Vec::new(), cols: Vec::new(), scroll: 0, running: false }
+        ResultsState {
+            rows: Vec::new(),
+            cols: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll_top: 0,
+            running: false,
+            source_table: None,
+        }
     }
 }
 
@@ -94,6 +110,41 @@ pub enum StatusMessage {
     Running,
     Error(String),
     Info(String),
+}
+
+/// A pending SQL statement queued in the history picker, ready to load into
+/// the editor.
+pub struct HistoryPicker {
+    /// All entries for the active connection, most recent last (as stored).
+    pub items: Vec<String>,
+    pub filter: String,
+    pub selected: usize,
+}
+
+impl HistoryPicker {
+    /// Entries matching the current filter, most-recent-first.
+    pub fn filtered(&self) -> Vec<&str> {
+        let needle = self.filter.to_ascii_lowercase();
+        self.items
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .filter(|sql| needle.is_empty() || sql.to_ascii_lowercase().contains(&needle))
+            .collect()
+    }
+}
+
+/// A modal that intercepts all key input until resolved.
+pub enum Overlay {
+    History(HistoryPicker),
+    /// Confirmation for a `DML` statement without `WHERE`. Carries what to
+    /// do if the user accepts.
+    Confirm {
+        sql: String,
+        message: String,
+        source_table: Option<(String, String)>,
+        record_history: bool,
+    },
 }
 
 /// Events fed into the main select loop, whatever their origin (terminal,
@@ -120,6 +171,9 @@ pub struct App {
     pub status: StatusMessage,
     pub quit: bool,
     pub cancel: Option<CancellationToken>,
+    pub overlay: Option<Overlay>,
+    /// Lazily loaded per-connection query history, keyed by connection name.
+    history: HashMap<String, History>,
     pub events: mpsc::UnboundedSender<AppEvent>,
 }
 
@@ -137,6 +191,8 @@ impl App {
             status: StatusMessage::Idle,
             quit: false,
             cancel: None,
+            overlay: None,
+            history: HashMap::new(),
             events,
         }
     }
@@ -167,6 +223,11 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
+        if self.overlay.is_some() {
+            self.on_overlay_key(key);
+            return;
+        }
+
         // Global keys work regardless of focus.
         match (key.code, key.modifiers) {
             (KeyCode::Tab, _) => {
@@ -185,6 +246,12 @@ impl App {
                 self.cancel_running_query();
                 return;
             }
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                self.open_history_picker();
+                return;
+            }
+            // Ctrl+E is handled by the terminal event loop (it needs to
+            // suspend/resume the terminal to shell out to `$EDITOR`).
             (KeyCode::Char('q'), KeyModifiers::NONE) if self.focus != Focus::Editor => {
                 self.quit = true;
                 return;
@@ -199,6 +266,82 @@ impl App {
             }
             Focus::Results => self.on_results_key(key),
         }
+    }
+
+    fn on_overlay_key(&mut self, key: KeyEvent) {
+        match self.overlay.take() {
+            Some(Overlay::History(mut picker)) => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter => {
+                    if let Some(sql) = picker.filtered().get(picker.selected).map(|s| s.to_string()) {
+                        self.editor = TextArea::new(sql.lines().map(String::from).collect());
+                        self.editor.move_cursor(tui_textarea::CursorMove::Bottom);
+                        self.editor.move_cursor(tui_textarea::CursorMove::End);
+                        self.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+                        self.focus = Focus::Editor;
+                    }
+                }
+                KeyCode::Up => {
+                    picker.selected = picker.selected.saturating_sub(1);
+                    self.overlay = Some(Overlay::History(picker));
+                }
+                KeyCode::Down => {
+                    let len = picker.filtered().len();
+                    if len > 0 {
+                        picker.selected = (picker.selected + 1).min(len - 1);
+                    }
+                    self.overlay = Some(Overlay::History(picker));
+                }
+                KeyCode::Backspace => {
+                    picker.filter.pop();
+                    picker.selected = 0;
+                    self.overlay = Some(Overlay::History(picker));
+                }
+                KeyCode::Char(c) => {
+                    picker.filter.push(c);
+                    picker.selected = 0;
+                    self.overlay = Some(Overlay::History(picker));
+                }
+                _ => {
+                    self.overlay = Some(Overlay::History(picker));
+                }
+            },
+            Some(Overlay::Confirm { sql, source_table, record_history, .. }) => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        self.run_query(sql, source_table, record_history);
+                    }
+                    _ => {
+                        self.status = StatusMessage::Info("cancelado".into());
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn open_history_picker(&mut self) {
+        let Some(ci) = self.active_conn else {
+            self.status = StatusMessage::Error("sin conexión activa".into());
+            return;
+        };
+        let name = self.conns[ci].entry.name.clone();
+        let items = self.history_for(&name).entries().iter().map(|e| e.sql.clone()).collect();
+        self.overlay = Some(Overlay::History(HistoryPicker { items, filter: String::new(), selected: 0 }));
+    }
+
+    fn history_for(&mut self, conn_name: &str) -> &mut History {
+        self.history.entry(conn_name.to_string()).or_insert_with(|| {
+            let path = crate::config::history_path(conn_name).unwrap_or_else(|_| {
+                std::env::temp_dir().join(format!("sqldr-history-{conn_name}.jsonl"))
+            });
+            History::load(path).unwrap_or_else(|_| {
+                // Fall back to an empty, non-persisted history rather than
+                // failing the whole picker over a disk error.
+                History::load(std::env::temp_dir().join("sqldr-history-fallback.jsonl"))
+                    .expect("temp dir is writable")
+            })
+        })
     }
 
     fn on_sidebar_key(&mut self, key: KeyEvent) {
@@ -262,19 +405,78 @@ impl App {
             ),
             200,
         );
+        let source_table = Some((db_name.clone(), table.name.clone()));
         self.active_conn = Some(ci);
         self.focus = Focus::Results;
-        self.run_query(sql);
+        // A LIMIT-200 preview is a convenience, not a deliberate query the
+        // user wants to recall later, so it doesn't get recorded.
+        self.run_query(sql, source_table, false);
     }
 
     fn on_results_key(&mut self, key: KeyEvent) {
+        let row_count = self.results.rows.len();
+        let col_count = self.results.cols.len();
         match key.code {
-            KeyCode::Up => self.results.scroll = self.results.scroll.saturating_sub(1),
-            KeyCode::Down => {
-                self.results.scroll = self.results.scroll.saturating_add(1);
+            KeyCode::Up => {
+                self.results.cursor_row = self.results.cursor_row.saturating_sub(1);
             }
+            KeyCode::Down => {
+                if row_count > 0 {
+                    self.results.cursor_row = (self.results.cursor_row + 1).min(row_count - 1);
+                }
+            }
+            KeyCode::Left => {
+                self.results.cursor_col = self.results.cursor_col.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                if col_count > 0 {
+                    self.results.cursor_col = (self.results.cursor_col + 1).min(col_count - 1);
+                }
+            }
+            KeyCode::Char('y') => self.copy_selected_cell(),
+            KeyCode::Char('Y') => self.copy_selected_row_as(RowFormat::Json),
+            KeyCode::Char('c') => self.copy_selected_row_as(RowFormat::Csv),
+            KeyCode::Char('i') => self.copy_selected_row_as(RowFormat::Insert),
             _ => {}
         }
+    }
+
+    fn copy_selected_cell(&mut self) {
+        let Some(row) = self.results.rows.get(self.results.cursor_row) else {
+            self.status = StatusMessage::Error("sin fila seleccionada".into());
+            return;
+        };
+        let Some(value) = row.values.get(self.results.cursor_col) else { return };
+        let text = crate::clipboard::cell_text(value);
+        self.report_copy(crate::clipboard::copy(&text), "celda");
+    }
+
+    fn copy_selected_row_as(&mut self, format: RowFormat) {
+        let Some(row) = self.results.rows.get(self.results.cursor_row) else {
+            self.status = StatusMessage::Error("sin fila seleccionada".into());
+            return;
+        };
+        let text = match format {
+            RowFormat::Json => crate::clipboard::row_json(row),
+            RowFormat::Csv => crate::clipboard::row_csv(row),
+            RowFormat::Insert => {
+                let Some((db, table)) = &self.results.source_table else {
+                    self.status = StatusMessage::Error(
+                        "INSERT no disponible: esta consulta no viene de una tabla".into(),
+                    );
+                    return;
+                };
+                crate::clipboard::row_insert(row, &format!("{db}.{table}"))
+            }
+        };
+        self.report_copy(crate::clipboard::copy(&text), format.label());
+    }
+
+    fn report_copy(&mut self, result: std::io::Result<()>, what: &str) {
+        self.status = match result {
+            Ok(()) => StatusMessage::Info(format!("{what} copiada (OSC 52)")),
+            Err(e) => StatusMessage::Error(format!("copiando {what}: {e}")),
+        };
     }
 
     fn run_editor_query(&mut self) {
@@ -282,31 +484,54 @@ impl App {
         if sql.trim().is_empty() {
             return;
         }
-        self.run_query(sql);
+        self.maybe_confirm_and_run(sql, None, true);
     }
 
-    fn run_query(&mut self, sql: String) {
+    /// Runs `sql` immediately, unless it's an `UPDATE`/`DELETE` without a
+    /// `WHERE` clause — then it's staged behind a confirmation overlay.
+    fn maybe_confirm_and_run(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool) {
+        if needs_where_confirmation(&sql) {
+            self.overlay = Some(Overlay::Confirm {
+                message: format!("Sin WHERE — ¿ejecutar de todas formas?\n\n{sql}"),
+                sql,
+                source_table,
+                record_history,
+            });
+            return;
+        }
+        self.run_query(sql, source_table, record_history);
+    }
+
+    fn run_query(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool) {
         let Some(ci) = self.active_conn else {
             self.status = StatusMessage::Error("sin conexión activa: elige una en el sidebar".into());
             return;
         };
-        let ConnStatus::Connected(driver) = &self.conns[ci].status else {
-            self.status = StatusMessage::Error("conexión aún no lista".into());
-            return;
+        let (read_only, name) = {
+            let entry = &self.conns[ci].entry;
+            (entry.read_only, entry.name.clone())
         };
-        let entry = &self.conns[ci].entry;
-        if entry.read_only && is_mutating(&sql) {
+        if read_only && is_mutating(&sql) {
             self.status = StatusMessage::Error(format!(
-                "'{}' es read-only; la sentencia parece una escritura",
-                entry.name
+                "'{name}' es read-only; la sentencia parece una escritura"
             ));
             return;
         }
+        let driver = match &self.conns[ci].status {
+            ConnStatus::Connected(driver) => Arc::clone(driver),
+            _ => {
+                self.status = StatusMessage::Error("conexión aún no lista".into());
+                return;
+            }
+        };
 
-        let driver = Arc::clone(driver);
+        if record_history {
+            let _ = self.history_for(&name).push(&sql);
+        }
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-        self.results = ResultsState { running: true, ..ResultsState::default() };
+        self.results = ResultsState { running: true, source_table, ..ResultsState::default() };
         self.status = StatusMessage::Running;
 
         let tx = self.events.clone();
@@ -410,6 +635,22 @@ impl App {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
                 self.status = StatusMessage::Error(format!("conectando '{}': {e}", self.conns[ci].entry.name));
             }
+        }
+    }
+}
+
+enum RowFormat {
+    Json,
+    Csv,
+    Insert,
+}
+
+impl RowFormat {
+    fn label(&self) -> &'static str {
+        match self {
+            RowFormat::Json => "fila (JSON)",
+            RowFormat::Csv => "fila (CSV)",
+            RowFormat::Insert => "fila (INSERT)",
         }
     }
 }

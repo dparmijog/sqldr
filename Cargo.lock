@@ -2088,6 +2088,7 @@ name = "sqldr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "directories",
@@ -2096,6 +2097,7 @@ dependencies = [
  "ratatui",
  "rpassword",
  "serde",
+ "serde_json",
  "sqldr-core",
  "tokio",
  "tokio-util",
@@ -2114,6 +2116,7 @@ dependencies = [
  "futures",
  "rust_decimal",
  "serde",
+ "serde_json",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
