@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/sqldr-core", "crates/sqldr"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+futures = "0.3"

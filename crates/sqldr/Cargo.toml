@@ -1,0 +1,18 @@
+[package]
+name = "sqldr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sqldr-core = { path = "../sqldr-core" }
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio-util.workspace = true
+toml = "0.8"
+directories = "5"
+futures.workspace = true
+rpassword = "7"
+keyring = { version = "3", features = ["sync-secret-service", "linux-native", "crypto-rust"] }
+clap = { version = "4", features = ["derive"] }
+url = "2"
