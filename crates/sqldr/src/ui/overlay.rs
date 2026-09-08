@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Overlay};
+use crate::app::{App, ConnField, ConnForm, Overlay};
 
 fn centered(width: u16, height_pct: u16, area: Rect) -> Rect {
     let width = width.min(area.width.saturating_sub(4)).max(20);
@@ -21,6 +21,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match overlay {
         Overlay::History(picker) => render_history(frame, picker),
         Overlay::Confirm { message, .. } => render_confirm(frame, message),
+        Overlay::AddConnection(form) => render_add_connection(frame, form),
     }
 }
 
@@ -66,6 +67,56 @@ fn render_confirm(frame: &mut Frame, message: &str) {
         "Enter/y: ejecutar   cualquier otra tecla: cancelar",
         Style::default().add_modifier(Modifier::ITALIC),
     )));
+
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_add_connection(frame: &mut Frame, form: &ConnForm) {
+    let area = centered(64, 60, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Nueva conexión (Ctrl+S: guardar, Esc: cancelar)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let field_style = |field: ConnField| {
+        if form.field == field {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        }
+    };
+    let text_line = |label: &str, value: &str, field: ConnField, mask: bool| {
+        let shown = if mask { "*".repeat(value.chars().count()) } else { value.to_string() };
+        Line::from(vec![
+            Span::raw(format!("{label:<10}")),
+            Span::styled(format!("{shown}_"), field_style(field)),
+        ])
+    };
+
+    let mut lines = vec![
+        text_line("Nombre", &form.name, ConnField::Name, false),
+        text_line("Host", &form.host, ConnField::Host, false),
+        text_line("Puerto", &form.port, ConnField::Port, false),
+        text_line("Usuario", &form.user, ConnField::User, false),
+        text_line("Password", &form.password, ConnField::Password, true),
+        text_line("Database", &form.database, ConnField::Database, false),
+        Line::from(vec![
+            Span::raw(format!("{:<10}", "Read-only")),
+            Span::styled(
+                if form.read_only { "[x] (espacio para cambiar)" } else { "[ ] (espacio para cambiar)" },
+                field_style(ConnField::ReadOnly),
+            ),
+        ]),
+        Line::default(),
+        Line::from("Tab/↓: siguiente campo   Shift+Tab/↑: anterior"),
+    ];
+    if let Some(err) = &form.error {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(err.as_str(), Style::default().fg(Color::Red))));
+    }
 
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);

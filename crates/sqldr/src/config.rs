@@ -2,12 +2,12 @@
 //! resolution via the OS keyring.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const KEYRING_SERVICE: &str = "sqldr";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnEntry {
     pub name: String,
     pub url: String,
@@ -15,7 +15,7 @@ pub struct ConnEntry {
     pub read_only: bool,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     #[serde(rename = "connections", default)]
     pub connections: Vec<ConnEntry>,
@@ -47,6 +47,17 @@ pub fn load() -> Result<Config> {
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Serializes `config` and writes it to `config_path()`, creating the
+/// containing directory if needed.
+pub fn save(config: &Config) -> Result<()> {
+    let path = config_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = toml::to_string_pretty(config).context("serializing config")?;
+    std::fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))
 }
 
 impl Config {

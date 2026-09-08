@@ -134,6 +134,81 @@ impl HistoryPicker {
     }
 }
 
+/// Which field of the "add connection" form currently has input focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConnField {
+    Name,
+    Host,
+    Port,
+    User,
+    Password,
+    Database,
+    ReadOnly,
+}
+
+impl ConnField {
+    const ORDER: [ConnField; 7] = [
+        ConnField::Name,
+        ConnField::Host,
+        ConnField::Port,
+        ConnField::User,
+        ConnField::Password,
+        ConnField::Database,
+        ConnField::ReadOnly,
+    ];
+
+    fn next(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+/// Form state for the "nueva conexión" modal (`Ctrl+N`).
+pub struct ConnForm {
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+    pub read_only: bool,
+    pub field: ConnField,
+    pub error: Option<String>,
+}
+
+impl ConnForm {
+    fn new() -> Self {
+        ConnForm {
+            name: String::new(),
+            host: String::new(),
+            port: String::new(),
+            user: String::new(),
+            password: String::new(),
+            database: String::new(),
+            read_only: false,
+            field: ConnField::Name,
+            error: None,
+        }
+    }
+
+    fn field_mut(&mut self, field: ConnField) -> Option<&mut String> {
+        match field {
+            ConnField::Name => Some(&mut self.name),
+            ConnField::Host => Some(&mut self.host),
+            ConnField::Port => Some(&mut self.port),
+            ConnField::User => Some(&mut self.user),
+            ConnField::Password => Some(&mut self.password),
+            ConnField::Database => Some(&mut self.database),
+            ConnField::ReadOnly => None,
+        }
+    }
+}
+
 /// A modal that intercepts all key input until resolved.
 pub enum Overlay {
     History(HistoryPicker),
@@ -145,6 +220,7 @@ pub enum Overlay {
         source_table: Option<(String, String)>,
         record_history: bool,
     },
+    AddConnection(ConnForm),
 }
 
 /// Events fed into the main select loop, whatever their origin (terminal,
@@ -355,6 +431,10 @@ impl App {
                 self.open_history_picker();
                 return;
             }
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                self.overlay = Some(Overlay::AddConnection(ConnForm::new()));
+                return;
+            }
             // Ctrl+E is handled by the terminal event loop (it needs to
             // suspend/resume the terminal to shell out to `$EDITOR`).
             (KeyCode::Char('q'), KeyModifiers::NONE) if self.focus != Focus::Editor => {
@@ -421,8 +501,111 @@ impl App {
                     }
                 }
             }
+            Some(Overlay::AddConnection(mut form)) => {
+                match (key.code, key.modifiers) {
+                    (KeyCode::Esc, _) => {
+                        self.status = StatusMessage::Info("cancelado".into());
+                    }
+                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                        self.submit_connection_form(form);
+                    }
+                    (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::Down, _) => {
+                        form.field = form.field.next();
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                        form.field = form.field.prev();
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    (KeyCode::Char(' '), _) | (KeyCode::Enter, _) if form.field == ConnField::ReadOnly => {
+                        form.read_only = !form.read_only;
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    (KeyCode::Enter, _) => {
+                        form.field = form.field.next();
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    (KeyCode::Backspace, _) => {
+                        let field = form.field;
+                        if let Some(s) = form.field_mut(field) {
+                            s.pop();
+                        }
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    (KeyCode::Char(c), _) => {
+                        let field = form.field;
+                        if let Some(s) = form.field_mut(field) {
+                            s.push(c);
+                        }
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                    _ => {
+                        self.overlay = Some(Overlay::AddConnection(form));
+                    }
+                }
+            }
             None => {}
         }
+    }
+
+    /// Validates the "add connection" form, and on success: builds the
+    /// connection URL, appends it to the in-memory connection list,
+    /// persists `config.toml`, and stores the password in the keyring
+    /// (never in the URL itself, matching how existing connections work).
+    fn submit_connection_form(&mut self, mut form: ConnForm) {
+        let name = form.name.trim().to_string();
+        if name.is_empty() {
+            form.error = Some("el nombre es obligatorio".into());
+            self.overlay = Some(Overlay::AddConnection(form));
+            return;
+        }
+        if self.conns.iter().any(|c| c.entry.name == name) {
+            form.error = Some(format!("ya existe una conexión llamada '{name}'"));
+            self.overlay = Some(Overlay::AddConnection(form));
+            return;
+        }
+
+        let host = if form.host.trim().is_empty() { "127.0.0.1" } else { form.host.trim() };
+        let port_str = if form.port.trim().is_empty() { "3306" } else { form.port.trim() };
+        let Ok(port) = port_str.parse::<u16>() else {
+            form.error = Some(format!("puerto inválido: '{port_str}'"));
+            self.overlay = Some(Overlay::AddConnection(form));
+            return;
+        };
+        let user = form.user.trim();
+        let db = form.database.trim();
+
+        let mut url = String::from("mysql://");
+        if !user.is_empty() {
+            url.push_str(user);
+            url.push('@');
+        }
+        url.push_str(host);
+        url.push(':');
+        url.push_str(&port.to_string());
+        if !db.is_empty() {
+            url.push('/');
+            url.push_str(db);
+        }
+
+        let entry = crate::config::ConnEntry { name: name.clone(), url, read_only: form.read_only };
+        self.conns.push(ConnState::new(entry.clone()));
+
+        let cfg = crate::config::Config { connections: self.conns.iter().map(|c| c.entry.clone()).collect() };
+        if let Err(e) = crate::config::save(&cfg) {
+            self.status = StatusMessage::Error(format!("conexión agregada pero no se pudo guardar config.toml: {e}"));
+            return;
+        }
+
+        if !form.password.is_empty() {
+            if let Err(e) = crate::config::set_password(&name, &form.password) {
+                self.status = StatusMessage::Error(format!("conexión guardada, pero falló guardar la contraseña: {e}"));
+                return;
+            }
+        }
+
+        self.status = StatusMessage::Info(format!("conexión '{name}' agregada"));
+        self.focus = Focus::Sidebar;
     }
 
     fn open_history_picker(&mut self) {

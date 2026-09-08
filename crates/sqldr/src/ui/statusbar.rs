@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::raw(
-        " | Tab: foco  Ctrl+Enter/F5: ejecutar  Ctrl+C: cancelar  Ctrl+R: historial  Ctrl+E: $EDITOR  q: salir",
+        " | Tab: foco  Ctrl+Enter/F5: ejecutar  Ctrl+C: cancelar  Ctrl+R: historial  Ctrl+N: nueva conexión  Ctrl+E: $EDITOR  q: salir",
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
