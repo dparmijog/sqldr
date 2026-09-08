@@ -51,7 +51,8 @@ fn decode_value(row: &MySqlRow, idx: usize, type_name: &str) -> anyhow::Result<V
         "DECIMAL" | "NUMERIC" => row
             .try_get::<Option<rust_decimal::Decimal>, _>(idx)
             .map(|v| v.map(|d| Value::Text(d.to_string())).unwrap_or(Value::Null)),
-        "VARCHAR" | "CHAR" | "TEXT" | "ENUM" | "SET" | "JSON" => try_as!(String, Value::Text),
+        "VARCHAR" | "CHAR" | "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" | "ENUM" | "SET"
+        | "JSON" => try_as!(String, Value::Text),
         "DATE" => row
             .try_get::<Option<chrono::NaiveDate>, _>(idx)
             .map(|v| v.map(|d| Value::Text(d.to_string())).unwrap_or(Value::Null)),
@@ -78,7 +79,9 @@ fn decode_value(row: &MySqlRow, idx: usize, type_name: &str) -> anyhow::Result<V
                 Err(e) => Err(e),
             }
         }
-        "BIT" => try_as!(Vec<u8>, Value::Bytes),
+        "BIT" => row
+            .try_get::<Option<u64>, _>(idx)
+            .map(|v| v.map(|n| Value::Text(n.to_string())).unwrap_or(Value::Null)),
         other => {
             // Best-effort fallback: try a string decode; if that fails too,
             // surface the type name so at least the shape is visible.
