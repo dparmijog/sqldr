@@ -67,6 +67,12 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
         anyhow::bail!("cancelado por el usuario");
     }
 
+    if let Ok(path) = config::history_path(&entry.name) {
+        if let Ok(mut history) = sqldr_core::History::load(path) {
+            let _ = history.push(sql);
+        }
+    }
+
     let conn_cfg = ConnConfig {
         name: entry.name.clone(),
         url,

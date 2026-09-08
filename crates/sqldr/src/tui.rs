@@ -115,6 +115,15 @@ async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_ke
         return Ok(());
     }
 
+    // `$EDITOR` commonly carries arguments (`"code --wait"`, `"vim -u NONE"`);
+    // tokenize it shell-style instead of treating the whole value as one
+    // program name, or those would fail to spawn entirely.
+    let mut parts = match shell_words::split(&editor_cmd) {
+        Ok(parts) if !parts.is_empty() => parts,
+        _ => vec![editor_cmd.clone()],
+    };
+    let program = parts.remove(0);
+
     if enhanced_keys {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
@@ -122,7 +131,11 @@ async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_ke
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    let status = tokio::process::Command::new(&editor_cmd).arg(&tmp_path).status().await;
+    let status = tokio::process::Command::new(&program)
+        .args(&parts)
+        .arg(&tmp_path)
+        .status()
+        .await;
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
