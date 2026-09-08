@@ -1078,20 +1078,28 @@ impl App {
                 self.status = StatusMessage::Error(format!("conectando '{}': {e}", self.conns[ci].entry.name));
             }
             AppEvent::WizardTested(id, result) => {
-                if let Some(Overlay::AddConnection(mut wizard)) = self.overlay.take() {
-                    if wizard.request_id == id {
-                        match result {
-                            Ok(databases) => {
-                                wizard.step = WizardStep::SelectDatabase { databases, selected: 0 };
-                            }
-                            Err(e) => {
-                                wizard.step = WizardStep::Details;
-                                wizard.error = Some(format!("no se pudo conectar: {e}"));
-                            }
-                        }
-                    }
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                let is_current = matches!(
+                    &self.overlay,
+                    Some(Overlay::AddConnection(wizard)) if wizard.request_id == id
+                );
+                if !is_current {
+                    // Stale result (wizard cancelled/reopened) or a
+                    // different overlay is open now — leave it alone.
+                    return;
                 }
+                let Some(Overlay::AddConnection(mut wizard)) = self.overlay.take() else {
+                    return;
+                };
+                match result {
+                    Ok(databases) => {
+                        wizard.step = WizardStep::SelectDatabase { databases, selected: 0 };
+                    }
+                    Err(e) => {
+                        wizard.step = WizardStep::Details;
+                        wizard.error = Some(format!("no se pudo conectar: {e}"));
+                    }
+                }
+                self.overlay = Some(Overlay::AddConnection(wizard));
             }
         }
     }
@@ -1121,4 +1129,72 @@ static NEXT_WIZARD_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 
 fn next_wizard_request_id() -> u64 {
     NEXT_WIZARD_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(Config::default(), tx)
+    }
+
+    #[test]
+    fn stale_wizard_test_result_does_not_clobber_a_different_overlay() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::History(HistoryPicker {
+            items: vec!["SELECT 1".to_string()],
+            filter: String::new(),
+            selected: 0,
+        }));
+
+        // A WizardTested event arrives (e.g. a stale background connection
+        // test) while a completely different overlay is open.
+        app.on_app_event(AppEvent::WizardTested(999, Ok(vec!["some_db".to_string()])));
+
+        assert!(
+            matches!(app.overlay, Some(Overlay::History(_))),
+            "an unrelated overlay must survive a WizardTested event for a different request"
+        );
+    }
+
+    #[test]
+    fn wizard_test_result_updates_matching_wizard() {
+        let mut app = test_app();
+        let mut wizard = ConnWizard::new();
+        wizard.step = WizardStep::Testing;
+        wizard.request_id = 42;
+        app.overlay = Some(Overlay::AddConnection(wizard));
+
+        app.on_app_event(AppEvent::WizardTested(42, Ok(vec!["some_db".to_string()])));
+
+        match &app.overlay {
+            Some(Overlay::AddConnection(w)) => match &w.step {
+                WizardStep::SelectDatabase { databases, .. } => {
+                    assert_eq!(databases, &vec!["some_db".to_string()]);
+                }
+                _ => panic!("expected SelectDatabase step after a successful test"),
+            },
+            _ => panic!("expected AddConnection overlay to remain"),
+        }
+    }
+
+    #[test]
+    fn stale_wizard_test_result_is_ignored_for_a_newer_wizard() {
+        let mut app = test_app();
+        let mut wizard = ConnWizard::new();
+        wizard.step = WizardStep::Testing;
+        wizard.request_id = 2; // newer than the stale result below
+        app.overlay = Some(Overlay::AddConnection(wizard));
+
+        app.on_app_event(AppEvent::WizardTested(1, Ok(vec!["some_db".to_string()])));
+
+        match &app.overlay {
+            Some(Overlay::AddConnection(w)) => {
+                assert!(matches!(w.step, WizardStep::Testing), "stale result must not advance a newer wizard");
+            }
+            _ => panic!("expected AddConnection overlay to remain"),
+        }
+    }
 }
