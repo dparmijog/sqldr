@@ -109,6 +109,12 @@ pub trait Driver: Send + Sync {
 
     async fn schema(&self) -> anyhow::Result<Schema>;
 
+    /// Lists databases/schemas visible on the server, without the cost of
+    /// walking every table inside them (unlike [`Driver::schema`]). Used by
+    /// the "add connection" wizard to let the user pick one after testing
+    /// credentials, before any database has been chosen.
+    async fn list_databases(&self) -> anyhow::Result<Vec<String>>;
+
     async fn explain(&self, sql: &str) -> anyhow::Result<Plan>;
 
     fn dialect(&self) -> &dyn Dialect;

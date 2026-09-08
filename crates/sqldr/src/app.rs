@@ -134,7 +134,31 @@ impl HistoryPicker {
     }
 }
 
-/// Which field of the "add connection" form currently has input focus.
+/// Database engine offered by the "add connection" wizard. Only MySQL is
+/// implemented today; the roadmap adds Postgres and SQLite as more
+/// `Driver` impls land, at which point they join `Engine::ALL`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    MySql,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 1] = [Engine::MySql];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::MySql => "MySQL",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::MySql => 3306,
+        }
+    }
+}
+
+/// Which field of the connection-details form currently has input focus.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConnField {
     Name,
@@ -142,18 +166,16 @@ pub enum ConnField {
     Port,
     User,
     Password,
-    Database,
     ReadOnly,
 }
 
 impl ConnField {
-    const ORDER: [ConnField; 7] = [
+    const ORDER: [ConnField; 6] = [
         ConnField::Name,
         ConnField::Host,
         ConnField::Port,
         ConnField::User,
         ConnField::Password,
-        ConnField::Database,
         ConnField::ReadOnly,
     ];
 
@@ -168,31 +190,51 @@ impl ConnField {
     }
 }
 
+/// Where the "add connection" wizard currently is. Mirrors the flow the
+/// user asked for: pick an engine, fill in host/credentials, test them
+/// live against the server, then pick a database from what's actually
+/// there — rather than typing a database name blind.
+#[derive(Clone)]
+pub enum WizardStep {
+    SelectEngine { selected: usize },
+    Details,
+    Testing,
+    SelectDatabase { databases: Vec<String>, selected: usize },
+}
+
 /// Form state for the "nueva conexión" modal (`Ctrl+N`).
-pub struct ConnForm {
+pub struct ConnWizard {
+    pub step: WizardStep,
+    pub engine: Engine,
     pub name: String,
     pub host: String,
     pub port: String,
     pub user: String,
     pub password: String,
-    pub database: String,
     pub read_only: bool,
     pub field: ConnField,
     pub error: Option<String>,
+    /// Identifies which background connection test this wizard is waiting
+    /// on, so a stale result (e.g. after the user cancelled and reopened
+    /// the wizard) is silently dropped instead of clobbering fresh state.
+    request_id: u64,
 }
 
-impl ConnForm {
+impl ConnWizard {
     fn new() -> Self {
-        ConnForm {
+        let engine = Engine::ALL[0];
+        ConnWizard {
+            step: WizardStep::SelectEngine { selected: 0 },
+            engine,
             name: String::new(),
-            host: String::new(),
-            port: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: engine.default_port().to_string(),
             user: String::new(),
             password: String::new(),
-            database: String::new(),
             read_only: false,
             field: ConnField::Name,
             error: None,
+            request_id: 0,
         }
     }
 
@@ -203,7 +245,6 @@ impl ConnForm {
             ConnField::Port => Some(&mut self.port),
             ConnField::User => Some(&mut self.user),
             ConnField::Password => Some(&mut self.password),
-            ConnField::Database => Some(&mut self.database),
             ConnField::ReadOnly => None,
         }
     }
@@ -220,7 +261,7 @@ pub enum Overlay {
         source_table: Option<(String, String)>,
         record_history: bool,
     },
-    AddConnection(ConnForm),
+    AddConnection(ConnWizard),
 }
 
 /// Events fed into the main select loop, whatever their origin (terminal,
@@ -236,6 +277,10 @@ pub enum AppEvent {
     SchemaError(usize, String),
     Connected(usize, Arc<MySqlDriver>),
     ConnectError(usize, String),
+    /// Result of testing credentials in the "add connection" wizard: the
+    /// request id (see [`ConnWizard::request_id`]) and either the server's
+    /// database list or an error message.
+    WizardTested(u64, Result<Vec<String>, String>),
 }
 
 /// Which border is currently being mouse-dragged to resize a pane.
@@ -432,7 +477,7 @@ impl App {
                 return;
             }
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                self.overlay = Some(Overlay::AddConnection(ConnForm::new()));
+                self.overlay = Some(Overlay::AddConnection(ConnWizard::new()));
                 return;
             }
             // Ctrl+E is handled by the terminal event loop (it needs to
@@ -501,94 +546,202 @@ impl App {
                     }
                 }
             }
-            Some(Overlay::AddConnection(mut form)) => {
-                match (key.code, key.modifiers) {
-                    (KeyCode::Esc, _) => {
-                        self.status = StatusMessage::Info("cancelado".into());
-                    }
-                    (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                        self.submit_connection_form(form);
-                    }
-                    (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::Down, _) => {
-                        form.field = form.field.next();
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
-                    (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
-                        form.field = form.field.prev();
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
-                    (KeyCode::Char(' '), _) | (KeyCode::Enter, _) if form.field == ConnField::ReadOnly => {
-                        form.read_only = !form.read_only;
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
-                    (KeyCode::Enter, _) => {
-                        form.field = form.field.next();
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
-                    (KeyCode::Backspace, _) => {
-                        let field = form.field;
-                        if let Some(s) = form.field_mut(field) {
-                            s.pop();
+            Some(Overlay::AddConnection(mut wizard)) => {
+                let step = wizard.step.clone();
+                match step {
+                    WizardStep::SelectEngine { selected } => match key.code {
+                        KeyCode::Esc => {
+                            self.status = StatusMessage::Info("cancelado".into());
                         }
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
-                    (KeyCode::Char(c), _) => {
-                        let field = form.field;
-                        if let Some(s) = form.field_mut(field) {
-                            s.push(c);
+                        KeyCode::Up => {
+                            wizard.step = WizardStep::SelectEngine { selected: selected.saturating_sub(1) };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
                         }
-                        self.overlay = Some(Overlay::AddConnection(form));
+                        KeyCode::Down => {
+                            let selected = (selected + 1).min(Engine::ALL.len() - 1);
+                            wizard.step = WizardStep::SelectEngine { selected };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        KeyCode::Enter => {
+                            wizard.engine = Engine::ALL[selected];
+                            wizard.port = wizard.engine.default_port().to_string();
+                            wizard.step = WizardStep::Details;
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        _ => {
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                    },
+                    WizardStep::Details => match (key.code, key.modifiers) {
+                        (KeyCode::Esc, _) => {
+                            wizard.error = None;
+                            wizard.step = WizardStep::SelectEngine { selected: 0 };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+                            self.start_connection_test(wizard);
+                        }
+                        (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::Down, _) => {
+                            wizard.field = wizard.field.next();
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                            wizard.field = wizard.field.prev();
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::Char(' '), _) | (KeyCode::Enter, _) if wizard.field == ConnField::ReadOnly => {
+                            wizard.read_only = !wizard.read_only;
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::Enter, _) => {
+                            wizard.field = wizard.field.next();
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::Backspace, _) => {
+                            let field = wizard.field;
+                            if let Some(s) = wizard.field_mut(field) {
+                                s.pop();
+                            }
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        (KeyCode::Char(c), _) => {
+                            let field = wizard.field;
+                            if let Some(s) = wizard.field_mut(field) {
+                                s.push(c);
+                            }
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        _ => {
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                    },
+                    WizardStep::Testing => {
+                        if key.code == KeyCode::Esc {
+                            wizard.step = WizardStep::Details;
+                        }
+                        self.overlay = Some(Overlay::AddConnection(wizard));
                     }
-                    _ => {
-                        self.overlay = Some(Overlay::AddConnection(form));
-                    }
+                    WizardStep::SelectDatabase { databases, selected } => match key.code {
+                        KeyCode::Esc => {
+                            wizard.step = WizardStep::Details;
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        KeyCode::Up => {
+                            wizard.step =
+                                WizardStep::SelectDatabase { databases, selected: selected.saturating_sub(1) };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        KeyCode::Down => {
+                            // Index 0 is the synthetic "no database" option.
+                            let selected = (selected + 1).min(databases.len());
+                            wizard.step = WizardStep::SelectDatabase { databases, selected };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                        KeyCode::Enter => {
+                            let database = if selected == 0 { None } else { databases.get(selected - 1).cloned() };
+                            self.finalize_connection(wizard, database);
+                        }
+                        _ => {
+                            wizard.step = WizardStep::SelectDatabase { databases, selected };
+                            self.overlay = Some(Overlay::AddConnection(wizard));
+                        }
+                    },
                 }
             }
             None => {}
         }
     }
 
-    /// Validates the "add connection" form, and on success: builds the
-    /// connection URL, appends it to the in-memory connection list,
-    /// persists `config.toml`, and stores the password in the keyring
-    /// (never in the URL itself, matching how existing connections work).
-    fn submit_connection_form(&mut self, mut form: ConnForm) {
-        let name = form.name.trim().to_string();
+    /// Validates the connection-details step, then tests the credentials
+    /// against the real server in the background (connecting without a
+    /// default database) so the next step can offer a live list of
+    /// databases to pick from.
+    fn start_connection_test(&mut self, mut wizard: ConnWizard) {
+        let name = wizard.name.trim().to_string();
         if name.is_empty() {
-            form.error = Some("el nombre es obligatorio".into());
-            self.overlay = Some(Overlay::AddConnection(form));
+            wizard.error = Some("el nombre es obligatorio".into());
+            self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         }
         if self.conns.iter().any(|c| c.entry.name == name) {
-            form.error = Some(format!("ya existe una conexión llamada '{name}'"));
-            self.overlay = Some(Overlay::AddConnection(form));
+            wizard.error = Some(format!("ya existe una conexión llamada '{name}'"));
+            self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         }
-
-        let host = if form.host.trim().is_empty() { "127.0.0.1" } else { form.host.trim() };
-        let port_str = if form.port.trim().is_empty() { "3306" } else { form.port.trim() };
+        let host = if wizard.host.trim().is_empty() { "127.0.0.1" } else { wizard.host.trim() }.to_string();
+        let port_str = if wizard.port.trim().is_empty() {
+            wizard.engine.default_port().to_string()
+        } else {
+            wizard.port.trim().to_string()
+        };
         let Ok(port) = port_str.parse::<u16>() else {
-            form.error = Some(format!("puerto inválido: '{port_str}'"));
-            self.overlay = Some(Overlay::AddConnection(form));
+            wizard.error = Some(format!("puerto inválido: '{port_str}'"));
+            self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         };
-        let user = form.user.trim();
-        let db = form.database.trim();
+        let user = wizard.user.trim().to_string();
 
-        let mut url = String::from("mysql://");
+        let mut url = match url::Url::parse(&format!("mysql://{host}:{port}")) {
+            Ok(u) => u,
+            Err(e) => {
+                wizard.error = Some(format!("host/puerto inválido: {e}"));
+                self.overlay = Some(Overlay::AddConnection(wizard));
+                return;
+            }
+        };
         if !user.is_empty() {
-            url.push_str(user);
-            url.push('@');
+            let _ = url.set_username(&user);
         }
-        url.push_str(host);
-        url.push(':');
-        url.push_str(&port.to_string());
-        if !db.is_empty() {
-            url.push('/');
-            url.push_str(db);
+        if !wizard.password.is_empty() {
+            let _ = url.set_password(Some(&wizard.password));
         }
 
-        let entry = crate::config::ConnEntry { name: name.clone(), url, read_only: form.read_only };
+        wizard.error = None;
+        wizard.step = WizardStep::Testing;
+        let request_id = next_wizard_request_id();
+        wizard.request_id = request_id;
+
+        let cfg = sqldr_core::ConnConfig { name, url: url.to_string(), read_only: wizard.read_only };
+        let tx = self.events.clone();
+        tokio::spawn(async move {
+            let result = match MySqlDriver::connect(&cfg).await {
+                Ok(driver) => driver.list_databases().await.map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(AppEvent::WizardTested(request_id, result));
+        });
+        self.overlay = Some(Overlay::AddConnection(wizard));
+    }
+
+    /// Builds the final connection URL (host/port/user/database — no
+    /// password), appends it to the config, persists it, and stores the
+    /// password in the keyring, mirroring how every other connection here
+    /// is set up.
+    fn finalize_connection(&mut self, wizard: ConnWizard, database: Option<String>) {
+        let name = wizard.name.trim().to_string();
+        let host = if wizard.host.trim().is_empty() { "127.0.0.1" } else { wizard.host.trim() };
+        let port_str = if wizard.port.trim().is_empty() {
+            wizard.engine.default_port().to_string()
+        } else {
+            wizard.port.trim().to_string()
+        };
+        let user = wizard.user.trim();
+
+        let mut url = match url::Url::parse(&format!("mysql://{host}:{port_str}")) {
+            Ok(u) => u,
+            Err(e) => {
+                self.status = StatusMessage::Error(format!("URL inválida: {e}"));
+                return;
+            }
+        };
+        if !user.is_empty() {
+            let _ = url.set_username(user);
+        }
+        if let Some(db) = &database {
+            url.set_path(db);
+        }
+
+        let entry = crate::config::ConnEntry { name: name.clone(), url: url.to_string(), read_only: wizard.read_only };
         self.conns.push(ConnState::new(entry.clone()));
 
         let cfg = crate::config::Config { connections: self.conns.iter().map(|c| c.entry.clone()).collect() };
@@ -597,8 +750,8 @@ impl App {
             return;
         }
 
-        if !form.password.is_empty() {
-            if let Err(e) = crate::config::set_password(&name, &form.password) {
+        if !wizard.password.is_empty() {
+            if let Err(e) = crate::config::set_password(&name, &wizard.password) {
                 self.status = StatusMessage::Error(format!("conexión guardada, pero falló guardar la contraseña: {e}"));
                 return;
             }
@@ -924,6 +1077,22 @@ impl App {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
                 self.status = StatusMessage::Error(format!("conectando '{}': {e}", self.conns[ci].entry.name));
             }
+            AppEvent::WizardTested(id, result) => {
+                if let Some(Overlay::AddConnection(mut wizard)) = self.overlay.take() {
+                    if wizard.request_id == id {
+                        match result {
+                            Ok(databases) => {
+                                wizard.step = WizardStep::SelectDatabase { databases, selected: 0 };
+                            }
+                            Err(e) => {
+                                wizard.step = WizardStep::Details;
+                                wizard.error = Some(format!("no se pudo conectar: {e}"));
+                            }
+                        }
+                    }
+                    self.overlay = Some(Overlay::AddConnection(wizard));
+                }
+            }
         }
     }
 }
@@ -946,4 +1115,10 @@ impl RowFormat {
 
 fn point_in(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+static NEXT_WIZARD_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_wizard_request_id() -> u64 {
+    NEXT_WIZARD_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }

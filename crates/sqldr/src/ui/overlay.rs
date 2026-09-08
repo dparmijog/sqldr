@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, ConnField, ConnForm, Overlay};
+use crate::app::{App, ConnField, ConnWizard, Engine, Overlay, WizardStep};
 
 fn centered(width: u16, height_pct: u16, area: Rect) -> Rect {
     let width = width.min(area.width.saturating_sub(4)).max(20);
@@ -72,17 +72,49 @@ fn render_confirm(frame: &mut Frame, message: &str) {
     frame.render_widget(paragraph, area);
 }
 
-fn render_add_connection(frame: &mut Frame, form: &ConnForm) {
+fn render_add_connection(frame: &mut Frame, wizard: &ConnWizard) {
+    match &wizard.step {
+        WizardStep::SelectEngine { selected } => render_select_engine(frame, *selected),
+        WizardStep::Details => render_connection_details(frame, wizard),
+        WizardStep::Testing => render_testing(frame, wizard),
+        WizardStep::SelectDatabase { databases, selected } => {
+            render_select_database(frame, databases, *selected)
+        }
+    }
+}
+
+fn render_select_engine(frame: &mut Frame, selected: usize) {
+    let area = centered(50, 40, frame.area());
+    frame.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = Engine::ALL.iter().map(|e| ListItem::new(e.label())).collect();
+    let block = Block::default()
+        .title("Nueva conexión — elegí el motor (Esc: cancelar)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(Engine::ALL.len() - 1)));
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_connection_details(frame: &mut Frame, wizard: &ConnWizard) {
     let area = centered(64, 60, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Nueva conexión (Ctrl+S: guardar, Esc: cancelar)")
+        .title(format!(
+            "Nueva conexión: {} (Ctrl+S: probar y continuar, Esc: atrás)",
+            wizard.engine.label()
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
     let field_style = |field: ConnField| {
-        if form.field == field {
+        if wizard.field == field {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
@@ -97,27 +129,68 @@ fn render_add_connection(frame: &mut Frame, form: &ConnForm) {
     };
 
     let mut lines = vec![
-        text_line("Nombre", &form.name, ConnField::Name, false),
-        text_line("Host", &form.host, ConnField::Host, false),
-        text_line("Puerto", &form.port, ConnField::Port, false),
-        text_line("Usuario", &form.user, ConnField::User, false),
-        text_line("Password", &form.password, ConnField::Password, true),
-        text_line("Database", &form.database, ConnField::Database, false),
+        text_line("Nombre", &wizard.name, ConnField::Name, false),
+        text_line("Host", &wizard.host, ConnField::Host, false),
+        text_line("Puerto", &wizard.port, ConnField::Port, false),
+        text_line("Usuario", &wizard.user, ConnField::User, false),
+        text_line("Password", &wizard.password, ConnField::Password, true),
         Line::from(vec![
             Span::raw(format!("{:<10}", "Read-only")),
             Span::styled(
-                if form.read_only { "[x] (espacio para cambiar)" } else { "[ ] (espacio para cambiar)" },
+                if wizard.read_only { "[x] (espacio para cambiar)" } else { "[ ] (espacio para cambiar)" },
                 field_style(ConnField::ReadOnly),
             ),
         ]),
         Line::default(),
         Line::from("Tab/↓: siguiente campo   Shift+Tab/↑: anterior"),
+        Line::from("La base de datos se elige después de probar la conexión."),
     ];
-    if let Some(err) = &form.error {
+    if let Some(err) = &wizard.error {
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(err.as_str(), Style::default().fg(Color::Red))));
     }
 
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+fn render_testing(frame: &mut Frame, wizard: &ConnWizard) {
+    let area = centered(60, 30, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Probando conexión (Esc: cancelar)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let host = if wizard.host.trim().is_empty() { "127.0.0.1" } else { wizard.host.trim() };
+    let message = format!(
+        "Conectando a {}@{}:{} ({})…",
+        if wizard.user.trim().is_empty() { "(sin usuario)" } else { wizard.user.trim() },
+        host,
+        wizard.port,
+        wizard.engine.label()
+    );
+    let paragraph = Paragraph::new(message).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+fn render_select_database(frame: &mut Frame, databases: &[String], selected: usize) {
+    let area = centered(60, 60, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut items = vec![ListItem::new("(sin base de datos por defecto)")];
+    items.extend(databases.iter().map(|db| ListItem::new(db.as_str())));
+
+    let block = Block::default()
+        .title("Elegí una base de datos (Enter: guardar, Esc: atrás)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(databases.len())));
+    frame.render_stateful_widget(list, area, &mut state);
 }

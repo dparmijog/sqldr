@@ -152,17 +152,7 @@ impl Driver for MySqlDriver {
     }
 
     async fn schema(&self) -> anyhow::Result<Schema> {
-        let db_rows = sqlx::query(
-            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
-             WHERE SCHEMA_NAME NOT IN ('mysql','information_schema','performance_schema','sys') \
-             ORDER BY SCHEMA_NAME",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let db_names = db_rows
-            .iter()
-            .map(|r| text_col(r, 0))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let db_names = list_database_names(&self.pool).await?;
 
         let mut databases = Vec::with_capacity(db_names.len());
         for db_name in db_names {
@@ -225,6 +215,10 @@ impl Driver for MySqlDriver {
         Ok(Schema { databases })
     }
 
+    async fn list_databases(&self) -> anyhow::Result<Vec<String>> {
+        list_database_names(&self.pool).await
+    }
+
     async fn explain(&self, sql: &str) -> anyhow::Result<Plan> {
         let explain_sql = format!("EXPLAIN {sql}");
         let raw_rows = sqlx::query(&explain_sql).fetch_all(&self.pool).await?;
@@ -238,4 +232,16 @@ impl Driver for MySqlDriver {
     fn dialect(&self) -> &dyn Dialect {
         &self.dialect
     }
+}
+
+/// Lists user databases, filtering out MySQL's own system schemas.
+async fn list_database_names(pool: &MySqlPool) -> anyhow::Result<Vec<String>> {
+    let db_rows = sqlx::query(
+        "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
+         WHERE SCHEMA_NAME NOT IN ('mysql','information_schema','performance_schema','sys') \
+         ORDER BY SCHEMA_NAME",
+    )
+    .fetch_all(pool)
+    .await?;
+    db_rows.iter().map(|r| text_col(r, 0)).collect()
 }
