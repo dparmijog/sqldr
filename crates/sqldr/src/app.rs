@@ -294,6 +294,13 @@ pub struct App {
     pub active_conn: Option<usize>,
     pub focus: Focus,
     pub sidebar_cursor: usize,
+    /// Top row currently visible in the sidebar; kept in sync with
+    /// `sidebar_cursor` by the sidebar renderer so scrolling only moves the
+    /// minimum amount needed, instead of jumping the whole viewport.
+    pub sidebar_scroll_top: usize,
+    /// Active table search text (`/` in the sidebar). `None` = normal tree
+    /// navigation; `Some(text)` = flat search across every loaded table.
+    pub sidebar_filter: Option<String>,
     pub editor: TextArea<'static>,
     pub results: ResultsState,
     pub status: StatusMessage,
@@ -322,6 +329,8 @@ impl App {
             active_conn: None,
             focus: Focus::Sidebar,
             sidebar_cursor: 0,
+            sidebar_scroll_top: 0,
+            sidebar_filter: None,
             editor,
             results: ResultsState::default(),
             status: StatusMessage::Idle,
@@ -378,13 +387,16 @@ impl App {
 
         if point_in(areas.sidebar, x, y) {
             self.focus = Focus::Sidebar;
-            let nodes = self.sidebar_nodes();
-            if !nodes.is_empty() {
-                // Row 0 of the pane's content area is the border; row 1 is
-                // the first list item.
-                let clicked = y.saturating_sub(areas.sidebar.y + 1) as usize;
-                self.sidebar_cursor = clicked.min(nodes.len() - 1);
-                self.activate_sidebar_node();
+            if self.sidebar_filter.is_none() {
+                let nodes = self.sidebar_nodes();
+                if !nodes.is_empty() {
+                    // Row 0 of the pane's content area is the border; row 1 is
+                    // the first list item.
+                    let clicked =
+                        self.sidebar_scroll_top + y.saturating_sub(areas.sidebar.y + 1) as usize;
+                    self.sidebar_cursor = clicked.min(nodes.len() - 1);
+                    self.activate_sidebar_node();
+                }
             }
             return;
         }
@@ -786,19 +798,74 @@ impl App {
     }
 
     fn on_sidebar_key(&mut self, key: KeyEvent) {
-        let nodes = self.sidebar_nodes();
-        if nodes.is_empty() {
+        if self.sidebar_filter.is_some() {
+            self.on_sidebar_search_key(key);
             return;
         }
+
+        let nodes = self.sidebar_nodes();
         match key.code {
+            KeyCode::Char('/') => {
+                self.sidebar_filter = Some(String::new());
+                self.sidebar_cursor = 0;
+                self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Up if !nodes.is_empty() => {
+                self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
+            }
+            KeyCode::Down if !nodes.is_empty() => {
+                self.sidebar_cursor = (self.sidebar_cursor + 1).min(nodes.len() - 1);
+            }
+            KeyCode::Enter if !nodes.is_empty() => {
+                self.activate_sidebar_node();
+            }
+            _ => {}
+        }
+    }
+
+    fn on_sidebar_search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.sidebar_filter = None;
+                self.sidebar_cursor = 0;
+                self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Enter => {
+                let matches = self.sidebar_search_matches();
+                if let Some(&(ci, di, ti)) = matches.get(self.sidebar_cursor) {
+                    self.sidebar_filter = None;
+                    self.sidebar_cursor = 0;
+                    self.sidebar_scroll_top = 0;
+                    // Expand the tree down to the match so, after the jump,
+                    // the sidebar shows where the table actually lives.
+                    self.conns[ci].expanded = true;
+                    if self.conns[ci].db_expanded.len() <= di {
+                        self.conns[ci].db_expanded.resize(di + 1, false);
+                    }
+                    self.conns[ci].db_expanded[di] = true;
+                    self.preview_table(ci, di, ti);
+                }
+            }
             KeyCode::Up => {
                 self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
             }
             KeyCode::Down => {
-                self.sidebar_cursor = (self.sidebar_cursor + 1).min(nodes.len() - 1);
+                let len = self.sidebar_search_matches().len();
+                if len > 0 {
+                    self.sidebar_cursor = (self.sidebar_cursor + 1).min(len - 1);
+                }
             }
-            KeyCode::Enter => {
-                self.activate_sidebar_node();
+            KeyCode::Backspace => {
+                if let Some(filter) = self.sidebar_filter.as_mut() {
+                    filter.pop();
+                }
+                self.sidebar_cursor = 0;
+            }
+            KeyCode::Char(c) => {
+                if let Some(filter) = self.sidebar_filter.as_mut() {
+                    filter.push(c);
+                }
+                self.sidebar_cursor = 0;
             }
             _ => {}
         }
@@ -852,6 +919,46 @@ impl App {
         // A LIMIT-200 preview is a convenience, not a deliberate query the
         // user wants to recall later, so it doesn't get recorded.
         self.run_query(sql, source_table, false);
+    }
+
+    /// Every loaded table across every connection, flattened and ignoring
+    /// expand state — the search index for `/` in the sidebar.
+    pub fn sidebar_search_nodes(&self) -> Vec<(usize, usize, usize)> {
+        let mut nodes = Vec::new();
+        for (ci, conn) in self.conns.iter().enumerate() {
+            if let Some(schema) = &conn.schema {
+                for (di, (_, tables)) in schema.databases.iter().enumerate() {
+                    for ti in 0..tables.len() {
+                        nodes.push((ci, di, ti));
+                    }
+                }
+            }
+        }
+        nodes
+    }
+
+    /// Search index filtered by the active `sidebar_filter`, case-insensitive
+    /// substring match against the qualified `connection/database/table`
+    /// label. Empty filter (just opened search) matches everything.
+    pub fn sidebar_search_matches(&self) -> Vec<(usize, usize, usize)> {
+        let Some(filter) = &self.sidebar_filter else { return Vec::new() };
+        let needle = filter.to_ascii_lowercase();
+        self.sidebar_search_nodes()
+            .into_iter()
+            .filter(|&(ci, di, ti)| needle.is_empty() || self.sidebar_search_label(ci, di, ti).to_ascii_lowercase().contains(&needle))
+            .collect()
+    }
+
+    pub fn sidebar_search_label(&self, ci: usize, di: usize, ti: usize) -> String {
+        let conn_name = self.conns.get(ci).map(|c| c.entry.name.as_str()).unwrap_or("?");
+        let schema = self.conns.get(ci).and_then(|c| c.schema.as_ref());
+        let db_name = schema.and_then(|s| s.databases.get(di)).map(|(name, _)| name.as_str()).unwrap_or("?");
+        let table_name = schema
+            .and_then(|s| s.databases.get(di))
+            .and_then(|(_, tables)| tables.get(ti))
+            .map(|t| t.name.as_str())
+            .unwrap_or("?");
+        format!("{conn_name}/{db_name}/{table_name}")
     }
 
     fn on_results_key(&mut self, key: KeyEvent) {

@@ -1,4 +1,5 @@
-//! Sidebar: connections → databases → tables tree.
+//! Sidebar: connections → databases → tables tree, plus a flat table
+//! search mode (`/`).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -7,16 +8,45 @@ use ratatui::Frame;
 
 use crate::app::{App, ConnStatus, Focus, SidebarNode};
 
-pub fn render(frame: &mut Frame, app: &App, area: Rect) {
-    let nodes = app.sidebar_nodes();
-    let items: Vec<ListItem> = nodes
-        .iter()
-        .map(|node| ListItem::new(label(app, node)))
-        .collect();
-
+pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
+
+    let (title, labels): (String, Vec<String>) = match &app.sidebar_filter {
+        Some(filter) => {
+            let matches = app.sidebar_search_matches();
+            let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
+            let labels = matches.iter().map(|&(ci, di, ti)| app.sidebar_search_label(ci, di, ti)).collect();
+            (title, labels)
+        }
+        None => {
+            let nodes = app.sidebar_nodes();
+            let labels = nodes.iter().map(|node| label(app, node)).collect();
+            ("Conexiones (/ busca tablas)".to_string(), labels)
+        }
+    };
+
+    // Keep the cursor inside the visible window, scrolling the minimum
+    // amount necessary rather than resetting to the top every frame (a
+    // freshly built `ListState` can't remember the previous offset).
+    let visible_height = area.height.saturating_sub(2) as usize; // top+bottom border
+    let total = labels.len();
+    if total == 0 {
+        app.sidebar_scroll_top = 0;
+    } else {
+        let cursor = app.sidebar_cursor.min(total - 1);
+        if cursor < app.sidebar_scroll_top {
+            app.sidebar_scroll_top = cursor;
+        } else if visible_height > 0 && cursor >= app.sidebar_scroll_top + visible_height {
+            app.sidebar_scroll_top = cursor + 1 - visible_height;
+        }
+    }
+    let start = app.sidebar_scroll_top.min(total);
+    let end = (start + visible_height.max(1)).min(total);
+
+    let items: Vec<ListItem> = labels[start..end].iter().map(|l| ListItem::new(l.as_str())).collect();
+
     let block = Block::default()
-        .title("Conexiones")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(if focused { Style::default().fg(Color::Cyan) } else { Style::default() });
 
@@ -25,8 +55,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let mut state = ListState::default();
-    if !nodes.is_empty() {
-        state.select(Some(app.sidebar_cursor.min(nodes.len() - 1)));
+    if total > 0 {
+        let cursor = app.sidebar_cursor.min(total - 1);
+        state.select(Some(cursor - start));
     }
 
     frame.render_stateful_widget(list, area, &mut state);
