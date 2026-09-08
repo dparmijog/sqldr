@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 const KEYRING_SERVICE: &str = "sqldr";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ConnEntry {
     pub name: String,
     pub url: String,

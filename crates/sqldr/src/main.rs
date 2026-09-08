@@ -1,16 +1,19 @@
+mod app;
 mod config;
+mod tui;
+mod ui;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use sqldr_core::{ConnConfig, Driver, MySqlDriver, Row};
+use sqldr_core::{is_mutating, ConnConfig, Driver, MySqlDriver, Row};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
 #[command(name = "sqldr", about = "TUI + CLI para administrar bases de datos")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -42,8 +45,9 @@ enum ConnAction {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Query { connection, sql } => run_query(&connection, &sql).await,
-        Commands::Conn { action } => run_conn(action).await,
+        Some(Commands::Query { connection, sql }) => run_query(&connection, &sql).await,
+        Some(Commands::Conn { action }) => run_conn(action).await,
+        None => tui::run(config::load()?).await,
     }
 }
 
@@ -93,16 +97,6 @@ async fn run_conn(action: ConnAction) -> Result<()> {
     }
 }
 
-/// Rough guardrail: flags statements that mutate data/schema so read-only
-/// connections refuse them before ever hitting the network.
-fn is_mutating(sql: &str) -> bool {
-    let head = sql.trim_start().to_ascii_uppercase();
-    const MUTATING: &[&str] = &[
-        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "REPLACE", "GRANT",
-        "REVOKE",
-    ];
-    MUTATING.iter().any(|kw| head.starts_with(kw))
-}
 
 fn print_rows(rows: &[Row]) {
     let Some(first) = rows.first() else {

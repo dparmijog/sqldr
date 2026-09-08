@@ -105,6 +105,29 @@ fn row_from_mysql(row: MySqlRow) -> anyhow::Result<Row> {
     Ok(Row { cols, values })
 }
 
+/// Decodes column `idx` as text, tolerating MySQL's binary-collation
+/// string columns (`sqlx`'s `Decode<MySql, String>` refuses any column
+/// with the `BINARY` flag set, which `information_schema` columns carry
+/// on this server despite holding plain readable text). Required because
+/// `schema()` reads catalog columns with `sqlx::query`/manual mapping
+/// instead of `query_as`, precisely to work around that restriction.
+fn opt_text_col(row: &MySqlRow, idx: usize) -> anyhow::Result<Option<String>> {
+    match row.try_get::<Option<String>, _>(idx) {
+        Ok(v) => Ok(v),
+        Err(_) => match row.try_get::<Option<Vec<u8>>, _>(idx) {
+            Ok(Some(bytes)) => Ok(Some(
+                String::from_utf8(bytes).map_err(|e| anyhow::anyhow!("{e}"))?,
+            )),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("decoding column {idx} as text: {e}")),
+        },
+    }
+}
+
+fn text_col(row: &MySqlRow, idx: usize) -> anyhow::Result<String> {
+    opt_text_col(row, idx)?.ok_or_else(|| anyhow::anyhow!("column {idx} is NULL, expected text"))
+}
+
 #[async_trait]
 impl Driver for MySqlDriver {
     async fn connect(cfg: &ConnConfig) -> anyhow::Result<Self> {
@@ -129,27 +152,35 @@ impl Driver for MySqlDriver {
     }
 
     async fn schema(&self) -> anyhow::Result<Schema> {
-        let dbs: Vec<(String,)> = sqlx::query_as(
+        let db_rows = sqlx::query(
             "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
              WHERE SCHEMA_NAME NOT IN ('mysql','information_schema','performance_schema','sys') \
              ORDER BY SCHEMA_NAME",
         )
         .fetch_all(&self.pool)
         .await?;
+        let db_names = db_rows
+            .iter()
+            .map(|r| text_col(r, 0))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-        let mut databases = Vec::with_capacity(dbs.len());
-        for (db_name,) in dbs {
-            let table_names: Vec<(String,)> = sqlx::query_as(
+        let mut databases = Vec::with_capacity(db_names.len());
+        for db_name in db_names {
+            let table_rows = sqlx::query(
                 "SELECT TABLE_NAME FROM information_schema.TABLES \
                  WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
             )
             .bind(&db_name)
             .fetch_all(&self.pool)
             .await?;
+            let table_names = table_rows
+                .iter()
+                .map(|r| text_col(r, 0))
+                .collect::<anyhow::Result<Vec<_>>>()?;
 
             let mut tables = Vec::with_capacity(table_names.len());
-            for (table_name,) in table_names {
-                let cols: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+            for table_name in table_names {
+                let col_rows = sqlx::query(
                     "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
                             NULLIF(COLUMN_KEY, '') \
                      FROM information_schema.COLUMNS \
@@ -160,8 +191,19 @@ impl Driver for MySqlDriver {
                 .bind(&table_name)
                 .fetch_all(&self.pool)
                 .await?;
+                let columns = col_rows
+                    .iter()
+                    .map(|r| {
+                        anyhow::Ok(Column {
+                            name: text_col(r, 0)?,
+                            ty: text_col(r, 1)?,
+                            nullable: text_col(r, 2)?.eq_ignore_ascii_case("YES"),
+                            key: opt_text_col(r, 3)?,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
 
-                let indexes: Vec<(String,)> = sqlx::query_as(
+                let idx_rows = sqlx::query(
                     "SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS \
                      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY INDEX_NAME",
                 )
@@ -169,20 +211,12 @@ impl Driver for MySqlDriver {
                 .bind(&table_name)
                 .fetch_all(&self.pool)
                 .await?;
+                let indexes = idx_rows
+                    .iter()
+                    .map(|r| text_col(r, 0))
+                    .collect::<anyhow::Result<Vec<_>>>()?;
 
-                tables.push(Table {
-                    name: table_name,
-                    columns: cols
-                        .into_iter()
-                        .map(|(name, ty, nullable, key)| Column {
-                            name,
-                            ty,
-                            nullable: nullable.eq_ignore_ascii_case("YES"),
-                            key,
-                        })
-                        .collect(),
-                    indexes: indexes.into_iter().map(|(n,)| n).collect(),
-                });
+                tables.push(Table { name: table_name, columns, indexes });
             }
 
             databases.push((db_name, tables));
