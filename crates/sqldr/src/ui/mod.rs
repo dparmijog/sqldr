@@ -1,5 +1,5 @@
 mod editor;
-mod layout;
+pub mod layout;
 mod overlay;
 mod results;
 mod sidebar;
@@ -10,7 +10,8 @@ use ratatui::Frame;
 use crate::app::App;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let areas = layout::split(frame.area());
+    app.last_area = frame.area();
+    let areas = layout::split(frame.area(), app.sidebar_width_pct, app.editor_height);
     sidebar::render(frame, app, areas.sidebar);
     editor::render(frame, app, areas.editor);
     results::render(frame, app, areas.results);

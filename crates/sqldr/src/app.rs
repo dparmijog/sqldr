@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use sqldr_core::{is_mutating, needs_where_confirmation, Driver, History, MySqlDriver, Row, Schema};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -151,6 +151,7 @@ pub enum Overlay {
 /// a running query, or a background schema load).
 pub enum AppEvent {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Resize,
     QueryRow(Row),
     QueryDone,
@@ -159,6 +160,12 @@ pub enum AppEvent {
     SchemaError(usize, String),
     Connected(usize, Arc<MySqlDriver>),
     ConnectError(usize, String),
+}
+
+/// Which border is currently being mouse-dragged to resize a pane.
+enum Drag {
+    SidebarBorder,
+    EditorBorder,
 }
 
 pub struct App {
@@ -172,6 +179,14 @@ pub struct App {
     pub quit: bool,
     pub cancel: Option<CancellationToken>,
     pub overlay: Option<Overlay>,
+    /// Sidebar width as a percentage of total width; mouse-drag resizable.
+    pub sidebar_width_pct: u16,
+    /// Editor pane height in rows; mouse-drag resizable.
+    pub editor_height: u16,
+    /// Area the UI was last rendered into, used to hit-test mouse events
+    /// against the same layout the user is looking at.
+    pub last_area: ratatui::layout::Rect,
+    drag: Option<Drag>,
     /// Lazily loaded per-connection query history, keyed by connection name.
     history: HashMap<String, History>,
     pub events: mpsc::UnboundedSender<AppEvent>,
@@ -192,8 +207,98 @@ impl App {
             quit: false,
             cancel: None,
             overlay: None,
+            sidebar_width_pct: 25,
+            editor_height: 7,
+            last_area: ratatui::layout::Rect::default(),
+            drag: None,
             history: HashMap::new(),
             events,
+        }
+    }
+
+    pub fn on_mouse(&mut self, mouse: MouseEvent) {
+        // Modals own all input while open; clicking through them onto the
+        // pane underneath would be confusing.
+        if self.overlay.is_some() {
+            return;
+        }
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(mouse.column, mouse.row),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => self.drag = None,
+            _ => {}
+        }
+    }
+
+    fn mouse_down(&mut self, x: u16, y: u16) {
+        let areas = crate::ui::layout::split(self.last_area, self.sidebar_width_pct, self.editor_height);
+
+        // Resize handles: a 2-cell-wide band straddling each border, wide
+        // enough to grab without needing pixel-perfect clicks.
+        let sidebar_border = areas.sidebar.x + areas.sidebar.width;
+        let near_sidebar_border = x + 1 >= sidebar_border
+            && x <= sidebar_border + 1
+            && y >= areas.sidebar.y
+            && y < areas.sidebar.y + areas.sidebar.height;
+        if near_sidebar_border {
+            self.drag = Some(Drag::SidebarBorder);
+            return;
+        }
+
+        let editor_border = areas.editor.y + areas.editor.height;
+        let near_editor_border = y + 1 >= editor_border
+            && y <= editor_border + 1
+            && x >= areas.editor.x
+            && x < areas.editor.x + areas.editor.width;
+        if near_editor_border {
+            self.drag = Some(Drag::EditorBorder);
+            return;
+        }
+
+        if point_in(areas.sidebar, x, y) {
+            self.focus = Focus::Sidebar;
+            let nodes = self.sidebar_nodes();
+            if !nodes.is_empty() {
+                // Row 0 of the pane's content area is the border; row 1 is
+                // the first list item.
+                let clicked = y.saturating_sub(areas.sidebar.y + 1) as usize;
+                self.sidebar_cursor = clicked.min(nodes.len() - 1);
+                self.activate_sidebar_node();
+            }
+            return;
+        }
+
+        if point_in(areas.editor, x, y) {
+            self.focus = Focus::Editor;
+            return;
+        }
+
+        if point_in(areas.results, x, y) {
+            self.focus = Focus::Results;
+            if !self.results.rows.is_empty() {
+                // Border + header row precede the data rows.
+                let clicked = y.saturating_sub(areas.results.y + 2) as usize;
+                self.results.cursor_row =
+                    (self.results.scroll_top + clicked).min(self.results.rows.len() - 1);
+            }
+        }
+    }
+
+    fn mouse_drag(&mut self, x: u16, y: u16) {
+        let areas = crate::ui::layout::split(self.last_area, self.sidebar_width_pct, self.editor_height);
+        match self.drag {
+            Some(Drag::SidebarBorder) => {
+                if self.last_area.width > 0 {
+                    let pct = (x.saturating_sub(self.last_area.x) as u32 * 100
+                        / self.last_area.width as u32) as u16;
+                    self.sidebar_width_pct = pct.clamp(10, 60);
+                }
+            }
+            Some(Drag::EditorBorder) => {
+                let height = y.saturating_sub(areas.editor.y).max(3);
+                self.editor_height = height.min(self.last_area.height.saturating_sub(6));
+            }
+            None => {}
         }
     }
 
@@ -603,6 +708,7 @@ impl App {
     pub fn on_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Key(key) => self.on_key(key),
+            AppEvent::Mouse(mouse) => self.on_mouse(mouse),
             AppEvent::Resize => {}
             AppEvent::QueryRow(row) => {
                 if self.results.cols.is_empty() {
@@ -653,4 +759,8 @@ impl RowFormat {
             RowFormat::Insert => "fila (INSERT)",
         }
     }
+}
+
+fn point_in(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }

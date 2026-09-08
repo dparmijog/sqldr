@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -27,7 +28,7 @@ type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
 pub async fn run(config: Config) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
     // Kitty keyboard protocol: without it, most terminals send the same
     // bytes for Ctrl+Enter as plain Enter, so Ctrl+Enter can't be told
@@ -51,7 +52,7 @@ pub async fn run(config: Config) -> Result<()> {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
@@ -81,6 +82,9 @@ async fn run_app(terminal: &mut Term, config: Config, enhanced_keys: bool) -> Re
                     }
                     Some(Ok(Event::Resize(_, _))) => {
                         app.on_app_event(AppEvent::Resize);
+                    }
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        app.on_app_event(AppEvent::Mouse(mouse));
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e.into()),
