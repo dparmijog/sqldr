@@ -78,10 +78,11 @@ impl ConnState {
 /// A flattened, renderable row of the sidebar's top-level tree
 /// (connections and their databases only — tables live inside a
 /// [`DbTab`], opened by selecting a database).
+#[derive(Clone, Copy)]
 pub enum SidebarNode {
-    /// A user-starred table, indexing `App::recents.favorites`.
+    /// A user-starred database, indexing `App::recents.favorites`.
     Favorite(usize),
-    /// A recently-viewed (non-favorited) table, indexing the filtered
+    /// A recently-opened (non-favorited) database, indexing the filtered
     /// list from `RecentTables::recent_excluding_favorites`.
     Recent(usize),
     Connection(usize),
@@ -874,5 +875,32 @@ mod tests {
         assert_eq!(app.tabs.len(), 1, "resolving pending_open must open the matching db tab");
         assert_eq!(app.tabs[0].db_name, "billing");
         assert!(app.pending_open.is_none(), "pending_open must clear once the database tab is opened");
+    }
+
+    #[test]
+    fn favoriting_a_tree_database_keeps_the_cursor_on_it_despite_the_list_shift() {
+        let mut app = test_app();
+        let mut conn = conn_with_databases("acme", vec!["billing".into(), "reporting".into()]);
+        conn.expanded = true;
+        app.conns.push(conn);
+        // sidebar_nodes(): [Connection(0), Database(0,0)=billing, Database(0,1)=reporting].
+        app.sidebar_cursor = 1; // billing
+
+        app.toggle_favorite_selected();
+
+        // Favoriting "billing" inserts a new Favorite(0) row above the
+        // tree, shifting Database(0,0) from index 1 to index 2 — the
+        // cursor must follow it there, not silently land on whatever now
+        // occupies index 1 (Connection(0), a completely different node).
+        assert_eq!(app.sidebar_cursor, 2, "cursor must follow the favorited database to its new index");
+        let nodes = app.sidebar_nodes();
+        assert!(matches!(nodes[app.sidebar_cursor], SidebarNode::Database(0, 0)));
+
+        // Unfavoriting it removes that pinned row again — the cursor must
+        // follow it back.
+        app.toggle_favorite_selected();
+        assert_eq!(app.sidebar_cursor, 1, "cursor must follow the database back after un-favoriting");
+        let nodes = app.sidebar_nodes();
+        assert!(matches!(nodes[app.sidebar_cursor], SidebarNode::Database(0, 0)));
     }
 }

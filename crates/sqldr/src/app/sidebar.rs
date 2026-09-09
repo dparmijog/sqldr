@@ -336,11 +336,19 @@ impl App {
             let conn = self.conns.get(tab.conn_idx)?.entry.name.clone();
             return Some(DbRef { conn, db: tab.db_name.clone() });
         }
-        match self.sidebar_nodes().get(self.sidebar_cursor)? {
-            SidebarNode::Favorite(idx) => self.recents.favorites.get(*idx).cloned(),
-            SidebarNode::Recent(idx) => self.recents.recent_excluding_favorites().get(*idx).map(|t| (*t).clone()),
+        self.node_db_ref(self.sidebar_nodes().get(self.sidebar_cursor)?)
+    }
+
+    /// Resolves any sidebar tree node to the database it represents, if
+    /// any — shared by `selected_db_ref` (current cursor) and
+    /// `toggle_favorite_selected` (relocating the cursor after the list
+    /// resizes).
+    fn node_db_ref(&self, node: &SidebarNode) -> Option<DbRef> {
+        match *node {
+            SidebarNode::Favorite(idx) => self.recents.favorites.get(idx).cloned(),
+            SidebarNode::Recent(idx) => self.recents.recent_excluding_favorites().get(idx).map(|t| (*t).clone()),
             SidebarNode::Connection(_) => None,
-            SidebarNode::Database(ci, di) => self.db_ref_for(*ci, *di),
+            SidebarNode::Database(ci, di) => self.db_ref_for(ci, di),
         }
     }
 
@@ -351,6 +359,14 @@ impl App {
     }
 
     pub(super) fn toggle_favorite_selected(&mut self) {
+        // If browsing the tree on a `Database` node, remember its
+        // `(ci, di)` so the cursor can return to that exact row after
+        // toggling — not just "some node with the same database", which
+        // would jump to the newly (un)pinned row instead.
+        let tree_node = match self.active_tab.is_none().then(|| self.sidebar_nodes().get(self.sidebar_cursor).cloned()).flatten() {
+            Some(SidebarNode::Database(ci, di)) => Some((ci, di)),
+            _ => None,
+        };
         let Some(db_ref) = self.selected_db_ref() else { return };
         let now_favorite = self.recents.toggle_favorite(db_ref.clone());
         self.persist_recents();
@@ -359,6 +375,22 @@ impl App {
         } else {
             format!("quitada de favoritos: {}", db_ref.label())
         });
+        // Favoriting/unfavoriting inserts or removes a pinned row above
+        // the tree, shifting every index below it — follow the cursor to
+        // wherever the same logical selection landed instead of leaving
+        // it on whatever now occupies the old index.
+        if self.active_tab.is_none() {
+            let nodes = self.sidebar_nodes();
+            let new_idx = match tree_node {
+                Some((ci, di)) => {
+                    nodes.iter().position(|n| matches!(n, SidebarNode::Database(c, d) if *c == ci && *d == di))
+                }
+                None => nodes.iter().position(|n| self.node_db_ref(n).as_ref() == Some(&db_ref)),
+            };
+            if let Some(new_idx) = new_idx {
+                self.sidebar_cursor = new_idx;
+            }
+        }
     }
 
     /// Every `(connection, database)` pair currently loaded, ignoring
