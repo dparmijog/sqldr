@@ -10,10 +10,15 @@ use crate::app::{App, Focus};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Results;
+    let page_info = app.results.pagination.as_ref().map(|p| format!(" — página {} (PgUp/PgDn)", p.page + 1));
     let title = if app.results.running {
-        format!("Resultados ({} filas, ejecutando…)", app.results.rows.len())
+        format!("Resultados ({} filas, ejecutando…){}", app.results.rows.len(), page_info.unwrap_or_default())
     } else {
-        format!("Resultados ({} filas) — y/Y/c/i: copiar celda/fila JSON/CSV/INSERT", app.results.rows.len())
+        format!(
+            "Resultados ({} filas){} — y/Y/c/i: copiar celda/fila JSON/CSV/INSERT",
+            app.results.rows.len(),
+            page_info.unwrap_or_default()
+        )
     };
     let block = Block::default()
         .title(title)

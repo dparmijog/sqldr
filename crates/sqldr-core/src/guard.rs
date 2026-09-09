@@ -21,15 +21,16 @@ pub fn is_mutating(sql: &str) -> bool {
 pub fn needs_where_confirmation(sql: &str) -> bool {
     let head = sql.trim_start().to_ascii_uppercase();
     let is_update_or_delete = head.starts_with("UPDATE") || head.starts_with("DELETE");
-    is_update_or_delete && !has_where_keyword(sql)
+    is_update_or_delete && !contains_keyword(sql, "WHERE")
 }
 
-/// Scans for a standalone `WHERE` keyword, ignoring occurrences inside
-/// string literals (`'...'`/`"..."`) so a literal like `'nowhere'` doesn't
-/// count. Best-effort, not a full SQL parser: a `WHERE` inside a subquery
-/// or `ON` clause still counts, which only makes this guardrail more
-/// lenient (fewer false "confirm?" prompts), never less safe.
-fn has_where_keyword(sql: &str) -> bool {
+/// Scans for a standalone keyword (e.g. `WHERE`, `LIMIT`), ignoring
+/// occurrences inside string literals (`'...'`/`"..."`) so a literal like
+/// `'nowhere'` doesn't count as `WHERE`. Best-effort, not a full SQL
+/// parser: a match inside a subquery or `ON` clause still counts, which
+/// only makes callers more lenient (fewer false positives), never less
+/// safe/accurate for their purposes.
+pub(crate) fn contains_keyword(sql: &str, keyword: &str) -> bool {
     let bytes = sql.as_bytes();
     let mut i = 0;
     let mut in_string: Option<u8> = None;
@@ -49,7 +50,7 @@ fn has_where_keyword(sql: &str) -> bool {
                     {
                         i += 1;
                     }
-                    if sql[start..i].eq_ignore_ascii_case("WHERE") {
+                    if sql[start..i].eq_ignore_ascii_case(keyword) {
                         return true;
                     }
                     continue;

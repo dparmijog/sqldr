@@ -52,27 +52,28 @@ pub struct ConnState {
     pub status: ConnStatus,
     pub expanded: bool,
     pub schema: Option<Schema>,
-    /// Expand state per database, indexed like `schema.databases`.
-    pub db_expanded: Vec<bool>,
 }
 
 impl ConnState {
     fn new(entry: ConnEntry) -> Self {
-        ConnState {
-            entry,
-            status: ConnStatus::Idle,
-            expanded: false,
-            schema: None,
-            db_expanded: Vec::new(),
-        }
+        ConnState { entry, status: ConnStatus::Idle, expanded: false, schema: None }
     }
 }
 
-/// A flattened, renderable row of the sidebar tree.
+/// A flattened, renderable row of the sidebar's top-level tree
+/// (connections and their databases only — tables live inside a
+/// [`DbTab`], opened by selecting a database).
 pub enum SidebarNode {
     Connection(usize),
     Database(usize, usize),
-    Table(usize, usize, usize),
+}
+
+/// An open "use this database" tab: selecting a database in the
+/// connection tree opens (or switches to) one of these, and the sidebar
+/// then shows that database's tables instead of the tree.
+pub struct DbTab {
+    pub conn_idx: usize,
+    pub db_idx: usize,
 }
 
 /// Result of the most recent query run, shown in the results pane.
@@ -88,6 +89,18 @@ pub struct ResultsState {
     /// `(database, table)` this result set was previewed from, if any.
     /// Enables "copy row as INSERT" (needs a concrete target table).
     pub source_table: Option<(String, String)>,
+    /// Present when this result set can be paged further/back — absent
+    /// when the query wasn't a plain read or already had its own `LIMIT`.
+    pub pagination: Option<PageState>,
+}
+
+/// Tracks the un-paginated SQL and current page for a paginated result set,
+/// so `PageUp`/`PageDown` can rebuild the query for the next/previous page.
+#[derive(Clone)]
+pub struct PageState {
+    pub base_sql: String,
+    pub page: usize,
+    pub page_size: u64,
 }
 
 impl Default for ResultsState {
@@ -100,6 +113,7 @@ impl Default for ResultsState {
             scroll_top: 0,
             running: false,
             source_table: None,
+            pagination: None,
         }
     }
 }
@@ -301,6 +315,11 @@ pub struct App {
     /// Active table search text (`/` in the sidebar). `None` = normal tree
     /// navigation; `Some(text)` = flat search across every loaded table.
     pub sidebar_filter: Option<String>,
+    /// Open "use this database" tabs.
+    pub tabs: Vec<DbTab>,
+    /// Index into `tabs` currently shown in the sidebar; `None` shows the
+    /// connection tree instead.
+    pub active_tab: Option<usize>,
     pub editor: TextArea<'static>,
     pub results: ResultsState,
     pub status: StatusMessage,
@@ -331,6 +350,8 @@ impl App {
             sidebar_cursor: 0,
             sidebar_scroll_top: 0,
             sidebar_filter: None,
+            tabs: Vec::new(),
+            active_tab: None,
             editor,
             results: ResultsState::default(),
             status: StatusMessage::Idle,
@@ -388,14 +409,28 @@ impl App {
         if point_in(areas.sidebar, x, y) {
             self.focus = Focus::Sidebar;
             if self.sidebar_filter.is_none() {
-                let nodes = self.sidebar_nodes();
-                if !nodes.is_empty() {
-                    // Row 0 of the pane's content area is the border; row 1 is
-                    // the first list item.
-                    let clicked =
-                        self.sidebar_scroll_top + y.saturating_sub(areas.sidebar.y + 1) as usize;
-                    self.sidebar_cursor = clicked.min(nodes.len() - 1);
-                    self.activate_sidebar_node();
+                if let Some(active) = self.active_tab {
+                    let (ci, di) = {
+                        let tab = &self.tabs[active];
+                        (tab.conn_idx, tab.db_idx)
+                    };
+                    let table_count = self.active_tab_table_count();
+                    if table_count > 0 {
+                        let clicked =
+                            self.sidebar_scroll_top + y.saturating_sub(areas.sidebar.y + 1) as usize;
+                        let ti = clicked.min(table_count - 1);
+                        self.preview_table(ci, di, ti);
+                    }
+                } else {
+                    let nodes = self.sidebar_nodes();
+                    if !nodes.is_empty() {
+                        // Row 0 of the pane's content area is the border; row
+                        // 1 is the first list item.
+                        let clicked =
+                            self.sidebar_scroll_top + y.saturating_sub(areas.sidebar.y + 1) as usize;
+                        self.sidebar_cursor = clicked.min(nodes.len() - 1);
+                        self.activate_sidebar_node();
+                    }
                 }
             }
             return;
@@ -445,15 +480,8 @@ impl App {
                 continue;
             }
             if let Some(schema) = &conn.schema {
-                for (di, (_, tables)) in schema.databases.iter().enumerate() {
+                for di in 0..schema.databases.len() {
                     nodes.push(SidebarNode::Database(ci, di));
-                    let expanded = conn.db_expanded.get(di).copied().unwrap_or(false);
-                    if !expanded {
-                        continue;
-                    }
-                    for ti in 0..tables.len() {
-                        nodes.push(SidebarNode::Table(ci, di, ti));
-                    }
                 }
             }
         }
@@ -551,7 +579,7 @@ impl App {
             Some(Overlay::Confirm { sql, source_table, record_history, .. }) => {
                 match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        self.run_query(sql, source_table, record_history);
+                        self.run_query(sql, source_table, record_history, 0, sqldr_core::DEFAULT_PAGE_SIZE);
                     }
                     _ => {
                         self.status = StatusMessage::Info("cancelado".into());
@@ -802,6 +830,10 @@ impl App {
             self.on_sidebar_search_key(key);
             return;
         }
+        if self.active_tab.is_some() {
+            self.on_sidebar_tab_key(key);
+            return;
+        }
 
         let nodes = self.sidebar_nodes();
         match key.code {
@@ -834,15 +866,7 @@ impl App {
                 let matches = self.sidebar_search_matches();
                 if let Some(&(ci, di, ti)) = matches.get(self.sidebar_cursor) {
                     self.sidebar_filter = None;
-                    self.sidebar_cursor = 0;
-                    self.sidebar_scroll_top = 0;
-                    // Expand the tree down to the match so, after the jump,
-                    // the sidebar shows where the table actually lives.
-                    self.conns[ci].expanded = true;
-                    if self.conns[ci].db_expanded.len() <= di {
-                        self.conns[ci].db_expanded.resize(di + 1, false);
-                    }
-                    self.conns[ci].db_expanded[di] = true;
+                    self.open_db_tab(ci, di);
                     self.preview_table(ci, di, ti);
                 }
             }
@@ -871,6 +895,90 @@ impl App {
         }
     }
 
+    /// Table list for the currently active tab (empty if none/not loaded).
+    fn active_tab_table_count(&self) -> usize {
+        let Some(active) = self.active_tab else { return 0 };
+        let tab = &self.tabs[active];
+        self.conns
+            .get(tab.conn_idx)
+            .and_then(|c| c.schema.as_ref())
+            .and_then(|s| s.databases.get(tab.db_idx))
+            .map(|(_, tables)| tables.len())
+            .unwrap_or(0)
+    }
+
+    fn on_sidebar_tab_key(&mut self, key: KeyEvent) {
+        let Some(active) = self.active_tab else { return };
+        let (ci, di) = {
+            let tab = &self.tabs[active];
+            (tab.conn_idx, tab.db_idx)
+        };
+        let table_count = self.active_tab_table_count();
+
+        match key.code {
+            KeyCode::Char('/') => {
+                self.sidebar_filter = Some(String::new());
+                self.sidebar_cursor = 0;
+                self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Esc => {
+                self.active_tab = None;
+                self.sidebar_cursor = 0;
+                self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Left => self.switch_tab(-1),
+            KeyCode::Right => self.switch_tab(1),
+            KeyCode::Char('x') => self.close_active_tab(),
+            KeyCode::Up if table_count > 0 => {
+                self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
+            }
+            KeyCode::Down if table_count > 0 => {
+                self.sidebar_cursor = (self.sidebar_cursor + 1).min(table_count - 1);
+            }
+            KeyCode::Enter if table_count > 0 => {
+                let ti = self.sidebar_cursor.min(table_count - 1);
+                self.preview_table(ci, di, ti);
+            }
+            _ => {}
+        }
+    }
+
+    /// Opens a tab for `(ci, di)` — "use this database" — or switches to it
+    /// if it's already open, rather than duplicating.
+    fn open_db_tab(&mut self, ci: usize, di: usize) {
+        self.active_conn = Some(ci);
+        let pos = self.tabs.iter().position(|t| t.conn_idx == ci && t.db_idx == di);
+        self.active_tab = Some(match pos {
+            Some(pos) => pos,
+            None => {
+                self.tabs.push(DbTab { conn_idx: ci, db_idx: di });
+                self.tabs.len() - 1
+            }
+        });
+        self.sidebar_cursor = 0;
+        self.sidebar_scroll_top = 0;
+    }
+
+    fn close_active_tab(&mut self) {
+        let Some(idx) = self.active_tab else { return };
+        self.tabs.remove(idx);
+        self.active_tab = if self.tabs.is_empty() { None } else { Some(idx.min(self.tabs.len() - 1)) };
+        self.sidebar_cursor = 0;
+        self.sidebar_scroll_top = 0;
+    }
+
+    fn switch_tab(&mut self, delta: i64) {
+        let Some(idx) = self.active_tab else { return };
+        if self.tabs.is_empty() {
+            return;
+        }
+        let len = self.tabs.len() as i64;
+        let new_idx = (idx as i64 + delta).rem_euclid(len) as usize;
+        self.active_tab = Some(new_idx);
+        self.sidebar_cursor = 0;
+        self.sidebar_scroll_top = 0;
+    }
+
     fn activate_sidebar_node(&mut self) {
         let nodes = self.sidebar_nodes();
         let Some(node) = nodes.get(self.sidebar_cursor) else { return };
@@ -884,14 +992,7 @@ impl App {
                 }
             }
             SidebarNode::Database(ci, di) => {
-                let conn = &mut self.conns[ci];
-                if conn.db_expanded.len() <= di {
-                    conn.db_expanded.resize(di + 1, false);
-                }
-                conn.db_expanded[di] = !conn.db_expanded[di];
-            }
-            SidebarNode::Table(ci, di, ti) => {
-                self.preview_table(ci, di, ti);
+                self.open_db_tab(ci, di);
             }
         }
     }
@@ -905,20 +1006,17 @@ impl App {
             return;
         };
         let dialect = driver.dialect();
-        let sql = dialect.limit(
-            &format!(
-                "SELECT * FROM {}.{}",
-                dialect.quote_ident(db_name),
-                dialect.quote_ident(&table.name)
-            ),
-            200,
+        let sql = format!(
+            "SELECT * FROM {}.{}",
+            dialect.quote_ident(db_name),
+            dialect.quote_ident(&table.name)
         );
         let source_table = Some((db_name.clone(), table.name.clone()));
         self.active_conn = Some(ci);
         self.focus = Focus::Results;
-        // A LIMIT-200 preview is a convenience, not a deliberate query the
-        // user wants to recall later, so it doesn't get recorded.
-        self.run_query(sql, source_table, false);
+        // The default page (LIMIT 500) is a convenience, not a deliberate
+        // query the user wants to recall later, so it doesn't get recorded.
+        self.run_query(sql, source_table, false, 0, sqldr_core::DEFAULT_PAGE_SIZE);
     }
 
     /// Every loaded table across every connection, flattened and ignoring
@@ -985,6 +1083,8 @@ impl App {
             KeyCode::Char('Y') => self.copy_selected_row_as(RowFormat::Json),
             KeyCode::Char('c') => self.copy_selected_row_as(RowFormat::Csv),
             KeyCode::Char('i') => self.copy_selected_row_as(RowFormat::Insert),
+            KeyCode::PageDown => self.go_to_page(1),
+            KeyCode::PageUp => self.go_to_page(-1),
             _ => {}
         }
     }
@@ -1047,10 +1147,36 @@ impl App {
             });
             return;
         }
-        self.run_query(sql, source_table, record_history);
+        self.run_query(sql, source_table, record_history, 0, sqldr_core::DEFAULT_PAGE_SIZE);
     }
 
-    fn run_query(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool) {
+    /// Re-runs a paginated result set's base query at a different page.
+    fn go_to_page(&mut self, delta: i64) {
+        let Some(pagination) = self.results.pagination.clone() else {
+            self.status = StatusMessage::Error("paginación no disponible para esta consulta".into());
+            return;
+        };
+        let new_page = if delta < 0 {
+            match pagination.page.checked_sub((-delta) as usize) {
+                Some(p) => p,
+                None => return, // already on the first page
+            }
+        } else {
+            pagination.page + delta as usize
+        };
+        let source_table = self.results.source_table.clone();
+        // Not a fresh query the user typed — don't record it again.
+        self.run_query(pagination.base_sql, source_table, false, new_page, pagination.page_size);
+    }
+
+    fn run_query(
+        &mut self,
+        sql: String,
+        source_table: Option<(String, String)>,
+        record_history: bool,
+        page: usize,
+        page_size: u64,
+    ) {
         let Some(ci) = self.active_conn else {
             self.status = StatusMessage::Error("sin conexión activa: elige una en el sidebar".into());
             return;
@@ -1077,15 +1203,20 @@ impl App {
             let _ = self.history_for(&name).push(&sql);
         }
 
+        let (exec_sql, pagination) = match sqldr_core::paginate(&sql, page, page_size) {
+            Some(paged) => (paged, Some(PageState { base_sql: sql, page, page_size })),
+            None => (sql, None),
+        };
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
-        self.results = ResultsState { running: true, source_table, ..ResultsState::default() };
+        self.results = ResultsState { running: true, source_table, pagination, ..ResultsState::default() };
         self.status = StatusMessage::Running;
 
         let tx = self.events.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
-            let mut stream = driver.query(&sql, cancel);
+            let mut stream = driver.query(&exec_sql, cancel);
             let mut sent_err = false;
             while let Some(item) = stream.next().await {
                 match item {
@@ -1173,7 +1304,6 @@ impl App {
                 self.conns[ci].status = ConnStatus::Connected(driver);
             }
             AppEvent::SchemaLoaded(ci, schema) => {
-                self.conns[ci].db_expanded = vec![false; schema.databases.len()];
                 self.conns[ci].schema = Some(*schema);
             }
             AppEvent::SchemaError(ci, e) => {

@@ -1,5 +1,6 @@
-//! Sidebar: connections → databases → tables tree, plus a flat table
-//! search mode (`/`).
+//! Sidebar: three modes sharing one list widget —
+//! connections/databases tree, an open database's table list ("tab"), and
+//! a flat table search (`/`).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -11,18 +12,17 @@ use crate::app::{App, ConnStatus, Focus, SidebarNode};
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
 
-    let (title, labels): (String, Vec<String>) = match &app.sidebar_filter {
-        Some(filter) => {
-            let matches = app.sidebar_search_matches();
-            let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
-            let labels = matches.iter().map(|&(ci, di, ti)| app.sidebar_search_label(ci, di, ti)).collect();
-            (title, labels)
-        }
-        None => {
-            let nodes = app.sidebar_nodes();
-            let labels = nodes.iter().map(|node| label(app, node)).collect();
-            ("Conexiones (/ busca tablas)".to_string(), labels)
-        }
+    let (title, labels): (String, Vec<String>) = if let Some(filter) = &app.sidebar_filter {
+        let matches = app.sidebar_search_matches();
+        let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
+        let labels = matches.iter().map(|&(ci, di, ti)| app.sidebar_search_label(ci, di, ti)).collect();
+        (title, labels)
+    } else if let Some(active) = app.active_tab {
+        (tab_title(app, active), tab_table_labels(app, active))
+    } else {
+        let nodes = app.sidebar_nodes();
+        let labels = nodes.iter().map(|node| label(app, node)).collect();
+        ("Conexiones (/ busca tablas)".to_string(), labels)
     };
 
     // Keep the cursor inside the visible window, scrolling the minimum
@@ -63,6 +63,39 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// Breadcrumb title for tab mode: every open tab, the active one bracketed,
+/// plus the key hints for switching/closing tabs.
+fn tab_title(app: &App, active: usize) -> String {
+    let crumbs: Vec<String> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(i, tab)| {
+            let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
+            let db_name = app
+                .conns
+                .get(tab.conn_idx)
+                .and_then(|c| c.schema.as_ref())
+                .and_then(|s| s.databases.get(tab.db_idx))
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("?");
+            let name = format!("{conn_name}/{db_name}");
+            if i == active { format!("[{name}]") } else { name }
+        })
+        .collect();
+    format!("{}  (←/→: tab  x: cerrar  Esc: conexiones)", crumbs.join("  "))
+}
+
+fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
+    let tab = &app.tabs[active];
+    app.conns
+        .get(tab.conn_idx)
+        .and_then(|c| c.schema.as_ref())
+        .and_then(|s| s.databases.get(tab.db_idx))
+        .map(|(_, tables)| tables.iter().map(|t| format!("· {}", t.name)).collect())
+        .unwrap_or_default()
+}
+
 fn label(app: &App, node: &SidebarNode) -> String {
     match *node {
         SidebarNode::Connection(ci) => {
@@ -83,26 +116,13 @@ fn label(app: &App, node: &SidebarNode) -> String {
             }
         }
         SidebarNode::Database(ci, di) => {
-            let conn = &app.conns[ci];
-            let expanded = conn.db_expanded.get(di).copied().unwrap_or(false);
-            let arrow = if expanded { "▾" } else { "▸" };
-            let name = conn
+            let name = app.conns[ci]
                 .schema
                 .as_ref()
                 .and_then(|s| s.databases.get(di))
                 .map(|(name, _)| name.as_str())
                 .unwrap_or("?");
-            format!("  {arrow} {name}")
-        }
-        SidebarNode::Table(ci, di, ti) => {
-            let name = app.conns[ci]
-                .schema
-                .as_ref()
-                .and_then(|s| s.databases.get(di))
-                .and_then(|(_, tables)| tables.get(ti))
-                .map(|t| t.name.as_str())
-                .unwrap_or("?");
-            format!("    · {name}")
+            format!("  ▸ {name}")
         }
     }
 }
