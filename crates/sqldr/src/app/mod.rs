@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
 use crate::config::{ConnEntry, Config};
+use crate::recents::{RecentTables, TableRef};
 use crate::theme::Theme;
 
 /// Which pane currently receives key input.
@@ -78,6 +79,11 @@ impl ConnState {
 /// (connections and their databases only — tables live inside a
 /// [`DbTab`], opened by selecting a database).
 pub enum SidebarNode {
+    /// A user-starred table, indexing `App::recents.favorites`.
+    Favorite(usize),
+    /// A recently-viewed (non-favorited) table, indexing the filtered
+    /// list from `RecentTables::recent_excluding_favorites`.
+    Recent(usize),
     Connection(usize),
     Database(usize, usize),
 }
@@ -106,6 +112,10 @@ pub struct ResultsState {
     /// Present when this result set can be paged further/back — absent
     /// when the query wasn't a plain read or already had its own `LIMIT`.
     pub pagination: Option<PageState>,
+    /// Per-column display width, grown to fit the widest value seen so
+    /// far (header included) as rows stream in — gives the results table
+    /// a real grid look instead of one flat `Min` width for every column.
+    pub col_widths: Vec<u16>,
 }
 
 /// Tracks the un-paginated SQL and current page for a paginated result set,
@@ -128,6 +138,7 @@ impl Default for ResultsState {
             running: false,
             source_table: None,
             pagination: None,
+            col_widths: Vec::new(),
         }
     }
 }
@@ -342,6 +353,11 @@ pub struct App {
     pub quit: bool,
     pub cancel: Option<CancellationToken>,
     pub overlay: Option<Overlay>,
+    /// Recently-viewed and favorited tables, pinned atop the sidebar tree.
+    pub recents: RecentTables,
+    /// A pinned-table open request waiting on its connection's schema to
+    /// finish loading (see `sidebar::open_pinned_table`).
+    pending_open: Option<TableRef>,
     /// Active color palette; changed live from the options dialog
     /// (`Ctrl+O`) and persisted to `config.toml` on confirm.
     pub theme: Theme,
@@ -359,7 +375,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, events: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(config: Config, recents: RecentTables, events: mpsc::UnboundedSender<AppEvent>) -> Self {
         let mut editor = TextArea::default();
         editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
         let theme = Theme::by_name(config.theme.as_deref().unwrap_or(""));
@@ -379,6 +395,8 @@ impl App {
             quit: false,
             cancel: None,
             overlay: None,
+            recents,
+            pending_open: None,
             theme,
             sidebar_width_pct: 25,
             editor_height: 7,
@@ -396,6 +414,16 @@ impl App {
         Config {
             connections: self.conns.iter().map(|c| c.entry.clone()).collect(),
             theme: Some(self.theme.name.to_string()),
+        }
+    }
+
+    /// Persists `recents` to disk; failures are non-fatal (surfaced in the
+    /// status line) since favorites/recents are a convenience, not the
+    /// source of truth for anything else in the app.
+    fn persist_recents(&mut self) {
+        let result = crate::config::recent_tables_path().and_then(|path| self.recents.save(&path));
+        if let Err(e) = result {
+            self.status = StatusMessage::Error(format!("no se pudo guardar recientes: {e}"));
         }
     }
 
@@ -474,6 +502,16 @@ impl App {
             AppEvent::QueryRow(row) => {
                 if self.results.cols.is_empty() {
                     self.results.cols = row.cols.clone();
+                    self.results.col_widths =
+                        self.results.cols.iter().map(|c| (c.chars().count() as u16).clamp(4, 40)).collect();
+                }
+                for (i, v) in row.values.iter().enumerate() {
+                    if let Some(w) = self.results.col_widths.get_mut(i) {
+                        let len = (v.to_string().chars().count() as u16).clamp(4, 40);
+                        if len > *w {
+                            *w = len;
+                        }
+                    }
                 }
                 self.results.rows.push(row);
             }
@@ -492,6 +530,15 @@ impl App {
             }
             AppEvent::SchemaLoaded(ci, schema) => {
                 self.conns[ci].schema = Some(*schema);
+                if let Some(table_ref) = self.pending_open.take() {
+                    if self.conns[ci].entry.name == table_ref.conn {
+                        self.open_pinned_table_from_schema(ci, &table_ref);
+                    } else {
+                        // A different connection's schema finished loading
+                        // first; keep waiting for the right one.
+                        self.pending_open = Some(table_ref);
+                    }
+                }
             }
             AppEvent::SchemaError(ci, e) => {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
@@ -539,7 +586,7 @@ mod tests {
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(Config::default(), tx)
+        App::new(Config::default(), RecentTables::default(), tx)
     }
 
     #[test]
@@ -680,5 +727,57 @@ mod tests {
                 theme.name
             );
         }
+    }
+
+    /// Guards `SQLDR_DATA_DIR` (a process-wide env var) so this is the
+    /// only test allowed to touch it, and never races another thread.
+    static DATA_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn sidebar_nodes_lists_favorites_then_recents_then_connections() {
+        let mut app = test_app();
+        app.recents.favorites.push(TableRef { conn: "a".into(), db: "d".into(), table: "fav".into() });
+        app.recents.touch(TableRef { conn: "a".into(), db: "d".into(), table: "rec".into() });
+        // Also touched, but already favorited — must not appear twice.
+        app.recents.touch(TableRef { conn: "a".into(), db: "d".into(), table: "fav".into() });
+
+        let nodes = app.sidebar_nodes();
+        assert!(matches!(nodes[0], SidebarNode::Favorite(0)), "favorites come first");
+        assert!(matches!(nodes[1], SidebarNode::Recent(0)), "then non-favorited recents");
+        assert_eq!(
+            nodes.iter().filter(|n| matches!(n, SidebarNode::Recent(_))).count(),
+            1,
+            "a favorited table must not also show up under Recent"
+        );
+    }
+
+    #[test]
+    fn favorite_toggle_from_pinned_list_persists_and_removes_entry() {
+        let _guard = DATA_ENV_LOCK.lock();
+        // `recent_tables_path` resolves through `SQLDR_DATA_DIR` when set,
+        // so this real disk-persistence assertion can never read or
+        // clobber the developer's actual recent_tables.json.
+        let dir = std::env::temp_dir().join(format!(
+            "sqldr-test-data-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SQLDR_DATA_DIR", &dir);
+
+        let mut app = test_app();
+        let table_ref = TableRef { conn: "demo".into(), db: "db".into(), table: "widgets".into() };
+        app.recents.favorites.push(table_ref.clone());
+        app.sidebar_cursor = 0;
+        assert!(matches!(app.sidebar_nodes().first(), Some(SidebarNode::Favorite(0))));
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+
+        assert!(!app.recents.is_favorite(&table_ref), "f must un-favorite the selected pinned entry");
+        let saved = RecentTables::load(&crate::config::recent_tables_path().unwrap());
+        assert!(!saved.is_favorite(&table_ref), "toggling favorite must persist to disk");
+
+        std::env::remove_var("SQLDR_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

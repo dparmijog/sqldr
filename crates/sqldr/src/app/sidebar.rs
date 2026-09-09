@@ -1,16 +1,26 @@
-//! Sidebar state: the connection/database tree, "use this database" tabs,
-//! and the flat table search (`/`).
+//! Sidebar state: pinned favorites/recents, the connection/database tree,
+//! "use this database" tabs, and the flat table search (`/`).
 
 use crossterm::event::{KeyCode, KeyEvent};
 use sqldr_core::Driver;
+
+use crate::recents::TableRef;
 
 use super::{App, ConnStatus, DbTab, SidebarNode};
 
 impl App {
     /// Flattens the sidebar tree according to current expand state, so
-    /// rendering and cursor movement share one source of truth.
+    /// rendering and cursor movement share one source of truth. Pinned
+    /// favorites/recents always lead, ahead of the connection tree, so
+    /// a frequently-used table never needs re-navigating.
     pub fn sidebar_nodes(&self) -> Vec<SidebarNode> {
         let mut nodes = Vec::new();
+        for i in 0..self.recents.favorites.len() {
+            nodes.push(SidebarNode::Favorite(i));
+        }
+        for i in 0..self.recents.recent_excluding_favorites().len() {
+            nodes.push(SidebarNode::Recent(i));
+        }
         for (ci, conn) in self.conns.iter().enumerate() {
             nodes.push(SidebarNode::Connection(ci));
             if !conn.expanded {
@@ -41,6 +51,9 @@ impl App {
                 self.sidebar_filter = Some(String::new());
                 self.sidebar_cursor = 0;
                 self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Char('f') if !nodes.is_empty() => {
+                self.toggle_favorite_selected();
             }
             KeyCode::Up if !nodes.is_empty() => {
                 self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
@@ -85,6 +98,8 @@ impl App {
                 }
                 self.sidebar_cursor = 0;
             }
+            // `f` is deliberately not bound here: in search mode every
+            // character is filter text the user is typing, not a command.
             KeyCode::Char(c) => {
                 if let Some(filter) = self.sidebar_filter.as_mut() {
                     filter.push(c);
@@ -120,6 +135,9 @@ impl App {
                 self.sidebar_filter = Some(String::new());
                 self.sidebar_cursor = 0;
                 self.sidebar_scroll_top = 0;
+            }
+            KeyCode::Char('f') if table_count > 0 => {
+                self.toggle_favorite_selected();
             }
             KeyCode::Esc => {
                 self.active_tab = None;
@@ -183,6 +201,17 @@ impl App {
         let nodes = self.sidebar_nodes();
         let Some(node) = nodes.get(self.sidebar_cursor) else { return };
         match *node {
+            SidebarNode::Favorite(idx) => {
+                if let Some(table_ref) = self.recents.favorites.get(idx).cloned() {
+                    self.open_pinned_table(table_ref);
+                }
+            }
+            SidebarNode::Recent(idx) => {
+                let table_ref = self.recents.recent_excluding_favorites().get(idx).map(|t| (*t).clone());
+                if let Some(table_ref) = table_ref {
+                    self.open_pinned_table(table_ref);
+                }
+            }
             SidebarNode::Connection(ci) => {
                 self.active_conn = Some(ci);
                 let conn = &mut self.conns[ci];
@@ -195,6 +224,50 @@ impl App {
                 self.open_db_tab(ci, di);
             }
         }
+    }
+
+    /// Opens a table referenced from the pinned Favorites/Recent sections.
+    /// Unlike `preview_table` (index-based, assumes an already-expanded,
+    /// schema-loaded connection), this resolves the connection by name and
+    /// connects/loads its schema first if needed, deferring the actual
+    /// open until `AppEvent::SchemaLoaded` arrives (see `pending_open`).
+    fn open_pinned_table(&mut self, table_ref: TableRef) {
+        let Some(ci) = self.conns.iter().position(|c| c.entry.name == table_ref.conn) else {
+            self.status = super::StatusMessage::Error(format!("conexión '{}' ya no existe", table_ref.conn));
+            return;
+        };
+        self.active_conn = Some(ci);
+        if self.conns[ci].schema.is_none() {
+            self.conns[ci].expanded = true;
+            if matches!(self.conns[ci].status, ConnStatus::Idle | ConnStatus::Error(_)) {
+                self.connect_and_load_schema(ci);
+            }
+            self.status = super::StatusMessage::Info(format!("conectando a '{}'…", self.conns[ci].entry.name));
+            self.pending_open = Some(table_ref);
+            return;
+        }
+        self.open_pinned_table_from_schema(ci, &table_ref);
+    }
+
+    /// Resolves `table_ref`'s database/table by name within `ci`'s
+    /// (now-loaded) schema and opens/previews it, exactly like clicking it
+    /// in the tree would. Called either immediately (schema already
+    /// loaded) or once deferred via `pending_open`.
+    pub(super) fn open_pinned_table_from_schema(&mut self, ci: usize, table_ref: &TableRef) {
+        let Some(schema) = &self.conns[ci].schema else { return };
+        let Some(di) = schema.databases.iter().position(|(name, _)| *name == table_ref.db) else {
+            self.status = super::StatusMessage::Error(format!(
+                "base de datos '{}' no encontrada en '{}'",
+                table_ref.db, table_ref.conn
+            ));
+            return;
+        };
+        let Some(ti) = schema.databases[di].1.iter().position(|t| t.name == table_ref.table) else {
+            self.status = super::StatusMessage::Error(format!("tabla '{}' no encontrada", table_ref.table));
+            return;
+        };
+        self.open_db_tab(ci, di);
+        self.preview_table(ci, di, ti);
     }
 
     pub(super) fn preview_table(&mut self, ci: usize, di: usize, ti: usize) {
@@ -212,11 +285,57 @@ impl App {
             dialect.quote_ident(&table.name)
         );
         let source_table = Some((db_name.clone(), table.name.clone()));
+        let table_ref =
+            TableRef { conn: self.conns[ci].entry.name.clone(), db: db_name.clone(), table: table.name.clone() };
+        self.recents.touch(table_ref);
+        self.persist_recents();
         self.active_conn = Some(ci);
         self.focus = super::Focus::Results;
         // The default page (LIMIT 500) is a convenience, not a deliberate
         // query the user wants to recall later, so it doesn't get recorded.
         self.run_query(sql, source_table, false, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
+    }
+
+    /// Resolves whatever table is currently selected in the sidebar,
+    /// regardless of mode — a pinned favorite/recent row or an open tab's
+    /// table list — used by the `f` favorite-toggle key. Tree mode
+    /// (Connection/Database nodes) and search mode have no single table
+    /// selected, so they resolve to `None`.
+    fn selected_table_ref(&self) -> Option<TableRef> {
+        if self.sidebar_filter.is_some() {
+            return None;
+        }
+        if let Some(active) = self.active_tab {
+            let (ci, di) = {
+                let tab = &self.tabs[active];
+                (tab.conn_idx, tab.db_idx)
+            };
+            return self.table_ref_for(ci, di, self.sidebar_cursor);
+        }
+        match self.sidebar_nodes().get(self.sidebar_cursor)? {
+            SidebarNode::Favorite(idx) => self.recents.favorites.get(*idx).cloned(),
+            SidebarNode::Recent(idx) => self.recents.recent_excluding_favorites().get(*idx).map(|t| (*t).clone()),
+            SidebarNode::Connection(_) | SidebarNode::Database(_, _) => None,
+        }
+    }
+
+    fn table_ref_for(&self, ci: usize, di: usize, ti: usize) -> Option<TableRef> {
+        let conn = self.conns.get(ci)?.entry.name.clone();
+        let schema = self.conns.get(ci)?.schema.as_ref()?;
+        let (db, tables) = schema.databases.get(di)?;
+        let table = tables.get(ti)?.name.clone();
+        Some(TableRef { conn, db: db.clone(), table })
+    }
+
+    pub(super) fn toggle_favorite_selected(&mut self) {
+        let Some(table_ref) = self.selected_table_ref() else { return };
+        let now_favorite = self.recents.toggle_favorite(table_ref.clone());
+        self.persist_recents();
+        self.status = super::StatusMessage::Info(if now_favorite {
+            format!("\u{2605} agregado a favoritos: {}", table_ref.label())
+        } else {
+            format!("quitado de favoritos: {}", table_ref.label())
+        });
     }
 
     /// Every loaded table across every connection, flattened and ignoring

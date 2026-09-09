@@ -37,6 +37,18 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(dirs.config_dir().join("config.toml"))
 }
 
+/// Path to the JSON file storing recently-viewed and favorited tables.
+/// Overridable via `SQLDR_DATA_DIR` (tests only — production never sets
+/// it), mirroring `SQLDR_CONFIG_DIR`'s isolation guarantee for `cargo test`.
+pub fn recent_tables_path() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("SQLDR_DATA_DIR") {
+        return Ok(PathBuf::from(dir).join("recent_tables.json"));
+    }
+    let dirs = directories::ProjectDirs::from("", "", "sqldr")
+        .context("could not determine data directory")?;
+    Ok(dirs.data_dir().join("recent_tables.json"))
+}
+
 /// Path to the on-disk history file for a connection, sanitizing the name
 /// into a safe filename component (no path traversal via connection names).
 pub fn history_path(conn_name: &str) -> Result<PathBuf> {

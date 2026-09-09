@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, AppEvent};
 use crate::config::Config;
+use crate::recents::RecentTables;
 use crate::ui;
 
 type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
@@ -63,7 +64,10 @@ fn is_ctrl_e(key: &crossterm::event::KeyEvent) -> bool {
 
 async fn run_app(terminal: &mut Term, config: Config, enhanced_keys: bool) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
-    let mut app = App::new(config, tx);
+    let recents_path = crate::config::recent_tables_path()
+        .unwrap_or_else(|_| std::env::temp_dir().join("sqldr-recent-tables-fallback.json"));
+    let recents = RecentTables::load(&recents_path);
+    let mut app = App::new(config, recents, tx);
     let mut term_events = EventStream::new();
 
     terminal.draw(|f| ui::draw(f, &mut app))?;

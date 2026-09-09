@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::app::{App, ConnStatus, Focus, SidebarNode};
+use crate::recents::TableRef;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
@@ -88,16 +89,39 @@ fn tab_title(app: &App, active: usize) -> String {
 
 fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
     let tab = &app.tabs[active];
+    let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.clone()).unwrap_or_default();
     app.conns
         .get(tab.conn_idx)
         .and_then(|c| c.schema.as_ref())
         .and_then(|s| s.databases.get(tab.db_idx))
-        .map(|(_, tables)| tables.iter().map(|t| format!("· {}", t.name)).collect())
+        .map(|(db_name, tables)| {
+            tables
+                .iter()
+                .map(|t| {
+                    let table_ref =
+                        TableRef { conn: conn_name.clone(), db: db_name.clone(), table: t.name.clone() };
+                    let marker = if app.recents.is_favorite(&table_ref) { "\u{2605}" } else { "\u{00b7}" };
+                    format!("{marker} {}", t.name)
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn label(app: &App, node: &SidebarNode) -> String {
     match *node {
+        SidebarNode::Favorite(idx) => app
+            .recents
+            .favorites
+            .get(idx)
+            .map(|t| format!("\u{2605} {}", t.label()))
+            .unwrap_or_else(|| "?".to_string()),
+        SidebarNode::Recent(idx) => app
+            .recents
+            .recent_excluding_favorites()
+            .get(idx)
+            .map(|t| format!("\u{00b7} {}", t.label()))
+            .unwrap_or_else(|| "?".to_string()),
         SidebarNode::Connection(ci) => {
             let conn = &app.conns[ci];
             let icon = match &conn.status {
