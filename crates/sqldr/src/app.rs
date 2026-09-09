@@ -544,10 +544,7 @@ impl App {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
                     if let Some(sql) = picker.filtered().get(picker.selected).map(|s| s.to_string()) {
-                        self.editor = TextArea::new(sql.lines().map(String::from).collect());
-                        self.editor.move_cursor(tui_textarea::CursorMove::Bottom);
-                        self.editor.move_cursor(tui_textarea::CursorMove::End);
-                        self.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+                        self.set_editor_sql(&sql);
                         self.focus = Focus::Editor;
                     }
                 }
@@ -1169,6 +1166,16 @@ impl App {
         self.run_query(pagination.base_sql, source_table, false, new_page, pagination.page_size);
     }
 
+    /// Replaces the editor's content, placing the cursor at the end so
+    /// typing continues naturally from there.
+    pub(crate) fn set_editor_sql(&mut self, sql: &str) {
+        let lines: Vec<String> = sql.lines().map(String::from).collect();
+        self.editor = TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+        self.editor.move_cursor(tui_textarea::CursorMove::Bottom);
+        self.editor.move_cursor(tui_textarea::CursorMove::End);
+        self.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+    }
+
     fn run_query(
         &mut self,
         sql: String,
@@ -1207,6 +1214,10 @@ impl App {
             Some(paged) => (paged, Some(PageState { base_sql: sql, page, page_size })),
             None => (sql, None),
         };
+        // Show exactly what's about to run — including any auto-applied
+        // LIMIT/OFFSET — so the user can see it and freely edit/rerun
+        // (e.g. drop the LIMIT) without hunting for it.
+        self.set_editor_sql(&exec_sql);
 
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());

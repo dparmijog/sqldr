@@ -17,7 +17,6 @@ use futures::{FutureExt, StreamExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
-use tui_textarea::TextArea;
 
 use crate::app::{App, AppEvent};
 use crate::config::Config;
@@ -154,11 +153,7 @@ async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_ke
     match status {
         Ok(exit) if exit.success() => match std::fs::read_to_string(&tmp_path) {
             Ok(content) => {
-                let lines: Vec<String> = content.lines().map(String::from).collect();
-                app.editor = TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
-                app.editor.move_cursor(tui_textarea::CursorMove::Bottom);
-                app.editor.move_cursor(tui_textarea::CursorMove::End);
-                app.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+                app.set_editor_sql(&content);
                 app.status = crate::app::StatusMessage::Info(format!("editado en {editor_cmd}"));
             }
             Err(e) => {
