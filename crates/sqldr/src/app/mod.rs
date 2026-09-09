@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
 use crate::config::{ConnEntry, Config};
-use crate::recents::{DbRef, RecentTables};
+use crate::favorites::{DbRef, Favorites};
 use crate::theme::Theme;
 
 /// Which pane currently receives key input.
@@ -80,11 +80,8 @@ impl ConnState {
 /// [`DbTab`], opened by selecting a database).
 #[derive(Clone, Copy)]
 pub enum SidebarNode {
-    /// A user-starred database, indexing `App::recents.favorites`.
+    /// A user-starred database, indexing `App::favorites.favorites`.
     Favorite(usize),
-    /// A recently-opened (non-favorited) database, indexing the filtered
-    /// list from `RecentTables::recent_excluding_favorites`.
-    Recent(usize),
     Connection(usize),
     Database(usize, usize),
 }
@@ -372,8 +369,8 @@ pub struct App {
     pub quit: bool,
     pub cancel: Option<CancellationToken>,
     pub overlay: Option<Overlay>,
-    /// Recently-opened and favorited databases, pinned atop the sidebar tree.
-    pub recents: RecentTables,
+    /// Favorited databases, pinned atop the sidebar tree.
+    pub favorites: Favorites,
     /// A pinned-database open request waiting on its connection's schema
     /// to finish loading (see `sidebar::open_pinned_database`).
     pending_open: Option<DbRef>,
@@ -394,7 +391,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(config: Config, recents: RecentTables, events: mpsc::UnboundedSender<AppEvent>) -> Self {
+    pub fn new(config: Config, favorites: Favorites, events: mpsc::UnboundedSender<AppEvent>) -> Self {
         let mut editor = TextArea::default();
         editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
         let theme = Theme::by_name(config.theme.as_deref().unwrap_or(""));
@@ -414,7 +411,7 @@ impl App {
             quit: false,
             cancel: None,
             overlay: None,
-            recents,
+            favorites,
             pending_open: None,
             theme,
             sidebar_width_pct: 25,
@@ -436,13 +433,13 @@ impl App {
         }
     }
 
-    /// Persists `recents` to disk; failures are non-fatal (surfaced in the
-    /// status line) since favorites/recents are a convenience, not the
-    /// source of truth for anything else in the app.
-    fn persist_recents(&mut self) {
-        let result = crate::config::recent_tables_path().and_then(|path| self.recents.save(&path));
+    /// Persists `favorites` to disk; failures are non-fatal (surfaced in
+    /// the status line) since favorites are a convenience, not the source
+    /// of truth for anything else in the app.
+    fn persist_favorites(&mut self) {
+        let result = crate::config::favorites_path().and_then(|path| self.favorites.save(&path));
         if let Err(e) = result {
-            self.status = StatusMessage::Error(format!("no se pudo guardar recientes: {e}"));
+            self.status = StatusMessage::Error(format!("no se pudo guardar favoritos: {e}"));
         }
     }
 
@@ -610,7 +607,7 @@ mod tests {
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();
-        App::new(Config::default(), RecentTables::default(), tx)
+        App::new(Config::default(), Favorites::default(), tx)
     }
 
     #[test]
@@ -758,29 +755,22 @@ mod tests {
     static DATA_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
-    fn sidebar_nodes_lists_favorites_then_recents_then_connections() {
+    fn sidebar_nodes_lists_favorites_then_connections() {
         let mut app = test_app();
-        app.recents.favorites.push(DbRef { conn: "a".into(), db: "fav".into() });
-        app.recents.touch(DbRef { conn: "a".into(), db: "rec".into() });
-        // Also touched, but already favorited — must not appear twice.
-        app.recents.touch(DbRef { conn: "a".into(), db: "fav".into() });
+        app.favorites.favorites.push(DbRef { conn: "a".into(), db: "fav".into() });
+        app.conns.push(ConnState::new(ConnEntry { name: "a".into(), url: "mysql://x".into(), read_only: false }));
 
         let nodes = app.sidebar_nodes();
         assert!(matches!(nodes[0], SidebarNode::Favorite(0)), "favorites come first");
-        assert!(matches!(nodes[1], SidebarNode::Recent(0)), "then non-favorited recents");
-        assert_eq!(
-            nodes.iter().filter(|n| matches!(n, SidebarNode::Recent(_))).count(),
-            1,
-            "a favorited database must not also show up under Recent"
-        );
+        assert!(matches!(nodes[1], SidebarNode::Connection(0)), "then the connection tree");
     }
 
     #[test]
     fn favorite_toggle_from_pinned_list_persists_and_removes_entry() {
         let _guard = DATA_ENV_LOCK.lock();
-        // `recent_tables_path` resolves through `SQLDR_DATA_DIR` when set,
-        // so this real disk-persistence assertion can never read or
-        // clobber the developer's actual recent_tables.json.
+        // `favorites_path` resolves through `SQLDR_DATA_DIR` when set, so
+        // this real disk-persistence assertion can never read or clobber
+        // the developer's actual favorites.json.
         let dir = std::env::temp_dir().join(format!(
             "sqldr-test-data-{}-{}",
             std::process::id(),
@@ -791,14 +781,14 @@ mod tests {
 
         let mut app = test_app();
         let db_ref = DbRef { conn: "demo".into(), db: "billing".into() };
-        app.recents.favorites.push(db_ref.clone());
+        app.favorites.favorites.push(db_ref.clone());
         app.sidebar_cursor = 0;
         assert!(matches!(app.sidebar_nodes().first(), Some(SidebarNode::Favorite(0))));
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
 
-        assert!(!app.recents.is_favorite(&db_ref), "f must un-favorite the selected pinned entry");
-        let saved = RecentTables::load(&crate::config::recent_tables_path().unwrap());
+        assert!(!app.favorites.is_favorite(&db_ref), "f must un-favorite the selected pinned entry");
+        let saved = Favorites::load(&crate::config::favorites_path().unwrap());
         assert!(!saved.is_favorite(&db_ref), "toggling favorite must persist to disk");
 
         std::env::remove_var("SQLDR_DATA_DIR");

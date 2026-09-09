@@ -1,4 +1,4 @@
-//! Sidebar: three modes sharing one list widget — pinned favorite/recent
+//! Sidebar: three modes sharing one list widget — pinned favorite
 //! databases plus the connection/database tree, an open database's table
 //! list ("tab"), and a `/` search scoped to whichever of those is showing
 //! (database names in tree mode, table names in tab mode).
@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::app::{App, ConnStatus, Focus, SidebarNode, TablesState};
-use crate::recents::DbRef;
+use crate::favorites::DbRef;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
@@ -88,7 +88,7 @@ fn tab_title(app: &App, active: usize) -> String {
         .map(|(i, tab)| {
             let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
             let db_ref = DbRef { conn: conn_name.to_string(), db: tab.db_name.clone() };
-            let star = if app.recents.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            let star = if app.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
             let name = format!("{star}{conn_name}/{}", tab.db_name);
             if i == active { format!("[{name}]") } else { name }
         })
@@ -107,16 +107,10 @@ fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
 fn label(app: &App, node: &SidebarNode) -> String {
     match *node {
         SidebarNode::Favorite(idx) => app
-            .recents
+            .favorites
             .favorites
             .get(idx)
             .map(|db| format!("\u{2605} {}", db.label()))
-            .unwrap_or_else(|| "?".to_string()),
-        SidebarNode::Recent(idx) => app
-            .recents
-            .recent_excluding_favorites()
-            .get(idx)
-            .map(|db| format!("\u{00b7} {}", db.label()))
             .unwrap_or_else(|| "?".to_string()),
         SidebarNode::Connection(ci) => {
             let conn = &app.conns[ci];
@@ -139,7 +133,7 @@ fn label(app: &App, node: &SidebarNode) -> String {
             let conn = &app.conns[ci];
             let name = conn.schema.as_ref().and_then(|s| s.databases.get(di)).map(|name| name.as_str()).unwrap_or("?");
             let db_ref = DbRef { conn: conn.entry.name.clone(), db: name.to_string() };
-            let star = if app.recents.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            let star = if app.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
             format!("  ▸ {star}{name}")
         }
     }

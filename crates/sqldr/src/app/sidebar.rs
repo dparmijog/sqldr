@@ -1,27 +1,24 @@
-//! Sidebar state: pinned favorite/recent databases, the connection/database
-//! tree, "use this database" tabs, and the flat search (`/`) — which
-//! searches *databases* while viewing the tree, and *tables* once a
-//! database's tab is open, rather than one search mixing both scopes.
+//! Sidebar state: pinned favorite databases, the connection/database tree,
+//! "use this database" tabs, and the flat search (`/`) — which searches
+//! *databases* while viewing the tree, and *tables* once a database's tab
+//! is open, rather than one search mixing both scopes.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use sqldr_core::Driver;
 
-use crate::recents::DbRef;
+use crate::favorites::DbRef;
 
 use super::{App, ConnStatus, DbTab, SidebarNode, StatusMessage, TablesState};
 
 impl App {
     /// Flattens the sidebar tree according to current expand state, so
     /// rendering and cursor movement share one source of truth. Pinned
-    /// favorite/recent databases always lead, ahead of the connection
-    /// tree, so a frequently-used database never needs re-navigating.
+    /// favorite databases always lead, ahead of the connection tree, so a
+    /// frequently-used database never needs re-navigating.
     pub fn sidebar_nodes(&self) -> Vec<SidebarNode> {
         let mut nodes = Vec::new();
-        for i in 0..self.recents.favorites.len() {
+        for i in 0..self.favorites.favorites.len() {
             nodes.push(SidebarNode::Favorite(i));
-        }
-        for i in 0..self.recents.recent_excluding_favorites().len() {
-            nodes.push(SidebarNode::Recent(i));
         }
         for (ci, conn) in self.conns.iter().enumerate() {
             nodes.push(SidebarNode::Connection(ci));
@@ -182,11 +179,9 @@ impl App {
     }
 
     /// Opens a tab for `(ci, di)` — "use this database" — or switches to it
-    /// if it's already open, rather than duplicating. Records the database
-    /// as recently-used every time (even when just switching to an
-    /// already-open tab). Fetching its tables (see [`TablesState`]) starts
-    /// here, the first time the tab is created — never eagerly for every
-    /// database up front.
+    /// if it's already open, rather than duplicating. Fetching its tables
+    /// (see [`TablesState`]) starts here, the first time the tab is
+    /// created — never eagerly for every database up front.
     fn open_db_tab(&mut self, ci: usize, di: usize) {
         self.active_conn = Some(ci);
         let db_name = self.conns[ci]
@@ -195,9 +190,6 @@ impl App {
             .and_then(|s| s.databases.get(di))
             .cloned()
             .unwrap_or_default();
-        let conn_name = self.conns[ci].entry.name.clone();
-        self.recents.touch(DbRef { conn: conn_name, db: db_name.clone() });
-        self.persist_recents();
 
         let pos = self.tabs.iter().position(|t| t.conn_idx == ci && t.db_idx == di);
         self.active_tab = Some(match pos {
@@ -237,13 +229,7 @@ impl App {
         let Some(node) = nodes.get(self.sidebar_cursor) else { return };
         match *node {
             SidebarNode::Favorite(idx) => {
-                if let Some(db_ref) = self.recents.favorites.get(idx).cloned() {
-                    self.open_pinned_database(db_ref);
-                }
-            }
-            SidebarNode::Recent(idx) => {
-                let db_ref = self.recents.recent_excluding_favorites().get(idx).map(|t| (*t).clone());
-                if let Some(db_ref) = db_ref {
+                if let Some(db_ref) = self.favorites.favorites.get(idx).cloned() {
                     self.open_pinned_database(db_ref);
                 }
             }
@@ -261,12 +247,12 @@ impl App {
         }
     }
 
-    /// Opens a database referenced from the pinned Favorites/Recent
-    /// sections. Unlike `open_db_tab` (index-based, assumes the
-    /// connection's schema is already loaded), this resolves the
-    /// connection by name and connects/loads its schema first if needed,
-    /// deferring the actual tab-open until `AppEvent::SchemaLoaded`
-    /// arrives (see `pending_open`).
+    /// Opens a database referenced from the pinned Favorites section.
+    /// Unlike `open_db_tab` (index-based, assumes the connection's schema
+    /// is already loaded), this resolves the connection by name and
+    /// connects/loads its schema first if needed, deferring the actual
+    /// tab-open until `AppEvent::SchemaLoaded` arrives (see
+    /// `pending_open`).
     fn open_pinned_database(&mut self, db_ref: DbRef) {
         let Some(ci) = self.conns.iter().position(|c| c.entry.name == db_ref.conn) else {
             self.status = StatusMessage::Error(format!("conexión '{}' ya no existe", db_ref.conn));
@@ -323,10 +309,10 @@ impl App {
     }
 
     /// Resolves whatever database is currently "selected" in the sidebar,
-    /// regardless of mode — a pinned favorite/recent row, a tree
-    /// `Database` node, or the database backing an open tab — used by the
-    /// `f` favorite-toggle key. Tree mode's `Connection` nodes and search
-    /// mode have no single database selected, so they resolve to `None`.
+    /// regardless of mode — a pinned favorite row, a tree `Database` node,
+    /// or the database backing an open tab — used by the `f`
+    /// favorite-toggle key. Tree mode's `Connection` nodes and search mode
+    /// have no single database selected, so they resolve to `None`.
     fn selected_db_ref(&self) -> Option<DbRef> {
         if self.sidebar_filter.is_some() {
             return None;
@@ -345,8 +331,7 @@ impl App {
     /// resizes).
     fn node_db_ref(&self, node: &SidebarNode) -> Option<DbRef> {
         match *node {
-            SidebarNode::Favorite(idx) => self.recents.favorites.get(idx).cloned(),
-            SidebarNode::Recent(idx) => self.recents.recent_excluding_favorites().get(idx).map(|t| (*t).clone()),
+            SidebarNode::Favorite(idx) => self.favorites.favorites.get(idx).cloned(),
             SidebarNode::Connection(_) => None,
             SidebarNode::Database(ci, di) => self.db_ref_for(ci, di),
         }
@@ -368,8 +353,8 @@ impl App {
             _ => None,
         };
         let Some(db_ref) = self.selected_db_ref() else { return };
-        let now_favorite = self.recents.toggle_favorite(db_ref.clone());
-        self.persist_recents();
+        let now_favorite = self.favorites.toggle(db_ref.clone());
+        self.persist_favorites();
         self.status = StatusMessage::Info(if now_favorite {
             format!("\u{2605} agregada a favoritos: {}", db_ref.label())
         } else {

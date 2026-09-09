@@ -1,7 +1,7 @@
 mod app;
 mod clipboard;
 mod config;
-mod recents;
+mod favorites;
 mod theme;
 mod tui;
 mod ui;
