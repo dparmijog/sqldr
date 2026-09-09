@@ -32,6 +32,7 @@ impl App {
     pub(super) fn run_editor_explain(&mut self) {
         let sql = self.editor.lines().join("\n");
         if sql.trim().is_empty() {
+            self.status = StatusMessage::Error("nothing to explain: the editor is empty".into());
             return;
         }
         let Some(ci) = self.active_conn else {
