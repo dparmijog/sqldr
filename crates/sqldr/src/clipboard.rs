@@ -80,7 +80,10 @@ pub fn row_insert(row: &Row, table: &str) -> String {
     format!("INSERT INTO {table} ({cols}) VALUES ({vals});")
 }
 
-fn sql_literal(value: &Value) -> String {
+/// Renders `value` as a SQL literal — reused by `row_insert` and by
+/// foreign-key navigation, which builds a `WHERE ref_col = <value>` from
+/// a cell the cursor is sitting on.
+pub fn sql_literal(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "TRUE".to_string() } else { "FALSE".to_string() },

@@ -67,11 +67,26 @@ pub struct ConnState {
     pub status: ConnStatus,
     pub expanded: bool,
     pub schema: Option<Schema>,
+    /// When the last successful heartbeat `SELECT 1` completed, if any —
+    /// shown next to a connected entry in the sidebar as a quick "this is
+    /// still alive" signal instead of only finding out on the next query.
+    pub last_ping: Option<std::time::Instant>,
+    /// Cancelled whenever this connection's underlying driver is replaced
+    /// or removed (reconnect, edit, delete), so a stale heartbeat loop
+    /// pinging a dropped pool never lingers.
+    heartbeat_cancel: Option<CancellationToken>,
 }
 
 impl ConnState {
     fn new(entry: ConnEntry) -> Self {
-        ConnState { entry, status: ConnStatus::Idle, expanded: false, schema: None }
+        ConnState {
+            entry,
+            status: ConnStatus::Idle,
+            expanded: false,
+            schema: None,
+            last_ping: None,
+            heartbeat_cancel: None,
+        }
     }
 }
 
@@ -267,6 +282,11 @@ pub struct ConnWizard {
     /// on, so a stale result (e.g. after the user cancelled and reopened
     /// the wizard) is silently dropped instead of clobbering fresh state.
     request_id: u64,
+    /// `Some(idx)` when this wizard is editing the connection at `conns[idx]`
+    /// (opened via `e` on a connection node) rather than adding a new one;
+    /// `finalize_connection` replaces that entry in place instead of
+    /// pushing a new one.
+    edit_target: Option<usize>,
 }
 
 impl ConnWizard {
@@ -284,6 +304,33 @@ impl ConnWizard {
             field: ConnField::Name,
             error: None,
             request_id: 0,
+            edit_target: None,
+        }
+    }
+
+    /// Pre-fills the details step from an existing connection's URL
+    /// (host/port/user; the password field is left blank — leaving it
+    /// blank on save keeps whatever is already stored in the keyring).
+    /// Skips the engine picker since only one engine exists to pick from.
+    fn for_edit(idx: usize, entry: &crate::config::ConnEntry) -> Self {
+        let engine = Engine::ALL[0];
+        let parsed = url::Url::parse(&entry.url).ok();
+        let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("127.0.0.1").to_string();
+        let port = parsed.as_ref().and_then(|u| u.port()).unwrap_or(engine.default_port()).to_string();
+        let user = parsed.as_ref().map(|u| u.username().to_string()).unwrap_or_default();
+        ConnWizard {
+            step: WizardStep::Details,
+            engine,
+            name: entry.name.clone(),
+            host,
+            port,
+            user,
+            password: String::new(),
+            read_only: entry.read_only,
+            field: ConnField::Name,
+            error: None,
+            request_id: 0,
+            edit_target: Some(idx),
         }
     }
 
@@ -315,6 +362,13 @@ pub enum Overlay {
     /// each theme live (`App::theme` is mutated immediately); `original`
     /// is restored on cancel, `Enter` persists the current preview.
     Settings { selected: usize, original: Theme },
+    /// Confirmation for removing a connection entirely (config entry +
+    /// stored keyring password), triggered by `d` on a connection node.
+    ConfirmDeleteConnection { conn_idx: usize, name: String },
+    /// Read-only table structure view (`s` on a table row): columns,
+    /// indexes, and foreign keys, from the already-loaded [`Table`].
+    /// Any key dismisses it.
+    TableStructure { db_name: String, table: Table },
 }
 
 /// Events fed into the main select loop, whatever their origin (terminal,
@@ -340,6 +394,11 @@ pub enum AppEvent {
     /// request id (see [`ConnWizard::request_id`]) and either the server's
     /// database list or an error message.
     WizardTested(u64, Result<Vec<String>, String>),
+    /// A background heartbeat `SELECT 1` against connection `ci` succeeded.
+    HeartbeatOk(usize),
+    /// A background heartbeat `SELECT 1` against connection `ci` failed —
+    /// the connection is treated as dropped (mirrors `ConnectError`).
+    HeartbeatError(usize, String),
 }
 
 pub struct App {
@@ -475,6 +534,10 @@ impl App {
                 self.overlay = Some(Overlay::AddConnection(ConnWizard::new()));
                 return;
             }
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+                self.run_editor_explain();
+                return;
+            }
             (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                 let selected = Theme::ALL.iter().position(|t| *t == self.theme).unwrap_or(0);
                 self.overlay = Some(Overlay::Settings { selected, original: self.theme });
@@ -506,6 +569,13 @@ impl App {
             }
             Some(Overlay::AddConnection(wizard)) => self.on_wizard_key(wizard, key),
             Some(Overlay::Settings { selected, original }) => self.on_settings_key(selected, original, key),
+            Some(Overlay::ConfirmDeleteConnection { conn_idx, name }) => {
+                self.on_confirm_delete_key(conn_idx, name, key)
+            }
+            Some(Overlay::TableStructure { .. }) => {
+                // Read-only info popup: any key dismisses it — already
+                // removed from `self.overlay` by `.take()` above.
+            }
             None => {}
         }
     }
@@ -542,7 +612,8 @@ impl App {
                 self.status = StatusMessage::Error(e);
             }
             AppEvent::Connected(ci, driver) => {
-                self.conns[ci].status = ConnStatus::Connected(driver);
+                self.conns[ci].status = ConnStatus::Connected(Arc::clone(&driver));
+                self.start_heartbeat(ci, driver);
             }
             AppEvent::SchemaLoaded(ci, schema) => {
                 self.conns[ci].schema = Some(*schema);
@@ -592,6 +663,19 @@ impl App {
                     }
                 }
                 self.overlay = Some(Overlay::AddConnection(wizard));
+            }
+            AppEvent::HeartbeatOk(ci) => {
+                if let Some(conn) = self.conns.get_mut(ci) {
+                    conn.last_ping = Some(std::time::Instant::now());
+                }
+            }
+            AppEvent::HeartbeatError(ci, e) => {
+                let name = self.conns.get(ci).map(|c| c.entry.name.clone()).unwrap_or_default();
+                if let Some(conn) = self.conns.get_mut(ci) {
+                    conn.status = ConnStatus::Error(e.clone());
+                    conn.heartbeat_cancel = None;
+                }
+                self.status = StatusMessage::Error(format!("connection '{name}' heartbeat failed: {e}"));
             }
         }
     }
@@ -839,8 +923,8 @@ mod tests {
             db_idx: 0,
             db_name: "billing".into(),
             tables: TablesState::Loaded(vec![
-                Table { name: "invoices".into(), columns: vec![], indexes: vec![] },
-                Table { name: "customers".into(), columns: vec![], indexes: vec![] },
+                Table { name: "invoices".into(), columns: vec![], indexes: vec![], foreign_keys: vec![] },
+                Table { name: "customers".into(), columns: vec![], indexes: vec![], foreign_keys: vec![] },
             ]),
         });
         app.active_tab = Some(0);
@@ -892,5 +976,176 @@ mod tests {
         assert_eq!(app.sidebar_cursor, 1, "cursor must follow the database back after un-favoriting");
         let nodes = app.sidebar_nodes();
         assert!(matches!(nodes[app.sidebar_cursor], SidebarNode::Database(0, 0)));
+    }
+
+    #[test]
+    fn editing_a_connection_updates_it_in_place() {
+        let _guard = CONFIG_ENV_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!(
+            "sqldr-test-config-edit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SQLDR_CONFIG_DIR", &dir);
+
+        let mut app = test_app();
+        app.conns.push(ConnState::new(ConnEntry {
+            name: "acme".into(),
+            url: "mysql://olduser@127.0.0.1:3306/db1".into(),
+            read_only: false,
+        }));
+        app.sidebar_cursor = 0;
+
+        app.edit_selected_connection();
+        let Some(Overlay::AddConnection(mut wizard)) = app.overlay.take() else {
+            panic!("expected the wizard to open pre-filled for editing");
+        };
+        assert_eq!(wizard.name, "acme", "editing must pre-fill the existing name");
+        assert_eq!(wizard.host, "127.0.0.1", "editing must pre-fill the existing host");
+        assert_eq!(wizard.user, "olduser", "editing must pre-fill the existing user");
+        assert!(matches!(wizard.step, WizardStep::Details), "editing must skip the engine picker");
+
+        // Drive straight to the post-test step (the live credential test
+        // itself is a background network call, exercised interactively,
+        // not here) — same shortcut `wizard_test_result_updates_matching_wizard` uses.
+        wizard.read_only = true;
+        wizard.step = WizardStep::SelectDatabase { databases: vec!["db2".into()], selected: 1 };
+        app.overlay = Some(Overlay::AddConnection(wizard));
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+        assert_eq!(app.conns.len(), 1, "editing must replace the entry in place, not add a second one");
+        assert!(app.conns[0].entry.read_only, "edited fields must be saved");
+        assert!(app.conns[0].entry.url.ends_with("/db2"), "the newly picked database must be saved");
+        assert!(app.overlay.is_none(), "finalizing must close the wizard");
+
+        std::env::remove_var("SQLDR_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleting_a_connection_removes_entry_closes_tabs_and_cancels_heartbeat() {
+        let _guard = CONFIG_ENV_LOCK.lock();
+        let dir = std::env::temp_dir().join(format!(
+            "sqldr-test-config-delete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SQLDR_CONFIG_DIR", &dir);
+
+        let mut app = test_app();
+        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        app.conns[0].heartbeat_cancel = Some(cancel.clone());
+        app.tabs.push(DbTab {
+            conn_idx: 0,
+            db_idx: 0,
+            db_name: "billing".into(),
+            tables: TablesState::Loading,
+        });
+        app.active_tab = Some(0);
+        app.active_conn = Some(0);
+        app.sidebar_cursor = 0;
+
+        app.request_delete_selected_connection();
+        match &app.overlay {
+            Some(Overlay::ConfirmDeleteConnection { conn_idx, name }) => {
+                assert_eq!(*conn_idx, 0);
+                assert_eq!(name, "acme");
+            }
+            _ => panic!("expected a delete confirmation overlay"),
+        }
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+
+        assert!(app.conns.is_empty(), "connection must be removed");
+        assert!(app.tabs.is_empty(), "tabs backed by the removed connection must close");
+        assert!(app.active_tab.is_none());
+        assert!(app.active_conn.is_none());
+        assert!(cancel.is_cancelled(), "deleting a connection must cancel its background heartbeat loop");
+
+        std::env::remove_var("SQLDR_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_key_navigation_requires_a_column_that_is_actually_a_foreign_key() {
+        use sqldr_core::{ForeignKey, Value};
+
+        let mut app = test_app();
+        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.tabs.push(DbTab {
+            conn_idx: 0,
+            db_idx: 0,
+            db_name: "billing".into(),
+            tables: TablesState::Loaded(vec![Table {
+                name: "invoices".into(),
+                columns: vec![],
+                indexes: vec![],
+                foreign_keys: vec![ForeignKey {
+                    column: "customer_id".into(),
+                    ref_table: "customers".into(),
+                    ref_column: "id".into(),
+                }],
+            }]),
+        });
+        app.active_conn = Some(0);
+        app.results.cols = vec!["id".into(), "customer_id".into()];
+        app.results.rows =
+            vec![Row { cols: app.results.cols.clone(), values: vec![Value::Int(1), Value::Int(42)] }];
+        app.results.source_table = Some(("billing".into(), "invoices".into()));
+        app.focus = Focus::Results;
+
+        // Cursor on `id` (not a FK): must be rejected with a specific error.
+        app.results.cursor_col = 0;
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+        assert!(
+            matches!(&app.status, StatusMessage::Error(e) if e.contains("is not a foreign key")),
+            "a non-FK column must be rejected"
+        );
+
+        // Cursor on `customer_id` (a real FK): must resolve past FK
+        // lookup, only failing later on "connection not ready" since this
+        // test has no live driver to actually run the follow-up query.
+        app.results.cursor_col = 1;
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+        assert!(
+            matches!(&app.status, StatusMessage::Error(e) if e.contains("connection not ready")),
+            "a real FK column must resolve past FK lookup, failing only on the missing live connection"
+        );
+    }
+
+    #[test]
+    fn table_structure_view_opens_from_a_loaded_table_and_any_key_closes_it() {
+        use sqldr_core::Column;
+
+        let mut app = test_app();
+        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.tabs.push(DbTab {
+            conn_idx: 0,
+            db_idx: 0,
+            db_name: "billing".into(),
+            tables: TablesState::Loaded(vec![Table {
+                name: "invoices".into(),
+                columns: vec![Column { name: "id".into(), ty: "int".into(), nullable: false, key: Some("PRI".into()) }],
+                indexes: vec!["PRIMARY".into()],
+                foreign_keys: vec![],
+            }]),
+        });
+        app.active_tab = Some(0);
+        app.sidebar_cursor = 0;
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+        match &app.overlay {
+            Some(Overlay::TableStructure { db_name, table }) => {
+                assert_eq!(db_name, "billing");
+                assert_eq!(table.name, "invoices");
+            }
+            _ => panic!("expected a TableStructure overlay to open"),
+        }
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(app.overlay.is_none(), "any key must dismiss the read-only structure popup");
     }
 }

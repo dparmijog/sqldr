@@ -127,7 +127,7 @@ impl App {
             self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         }
-        if self.conns.iter().any(|c| c.entry.name == name) {
+        if self.conns.iter().enumerate().any(|(i, c)| c.entry.name == name && Some(i) != wizard.edit_target) {
             wizard.error = Some(format!("a connection named '{name}' already exists"));
             self.overlay = Some(Overlay::AddConnection(wizard));
             return;
@@ -156,8 +156,20 @@ impl App {
         if !user.is_empty() {
             let _ = url.set_username(&user);
         }
-        if !wizard.password.is_empty() {
-            let _ = url.set_password(Some(&wizard.password));
+        // Editing with the password field left blank means "keep what's
+        // already stored" — but the live test still needs a real password
+        // to authenticate with, so fall back to whatever's in the keyring
+        // under the connection's current (pre-edit) name.
+        let password_for_test = if !wizard.password.is_empty() {
+            Some(wizard.password.clone())
+        } else {
+            wizard
+                .edit_target
+                .and_then(|idx| self.conns.get(idx))
+                .and_then(|c| crate::config::get_password(&c.entry.name).ok().flatten())
+        };
+        if let Some(pw) = &password_for_test {
+            let _ = url.set_password(Some(pw));
         }
 
         wizard.error = None;
@@ -206,11 +218,38 @@ impl App {
         }
 
         let entry = crate::config::ConnEntry { name: name.clone(), url: url.to_string(), read_only: wizard.read_only };
-        self.conns.push(ConnState::new(entry.clone()));
+
+        match wizard.edit_target {
+            Some(idx) => {
+                let old_name = self.conns[idx].entry.name.clone();
+                if let Some(cancel) = self.conns[idx].heartbeat_cancel.take() {
+                    cancel.cancel();
+                }
+                self.conns[idx].entry = entry;
+                // The old driver/schema no longer match these credentials
+                // (host/user/password/database may all have changed) —
+                // reset so the next expand reconnects from scratch.
+                self.conns[idx].status = super::ConnStatus::Idle;
+                self.conns[idx].schema = None;
+                self.conns[idx].expanded = false;
+
+                // Renamed with no fresh password typed: migrate whatever
+                // was already stored, or `resolve_url` would look it up
+                // under the new name and find nothing.
+                if old_name != name && wizard.password.is_empty() {
+                    if let Ok(Some(pw)) = crate::config::get_password(&old_name) {
+                        let _ = crate::config::set_password(&name, &pw);
+                    }
+                }
+            }
+            None => {
+                self.conns.push(ConnState::new(entry));
+            }
+        }
 
         let cfg = self.to_config();
         if let Err(e) = crate::config::save(&cfg) {
-            self.status = StatusMessage::Error(format!("connection added but config.toml could not be saved: {e}"));
+            self.status = StatusMessage::Error(format!("connection saved but config.toml could not be saved: {e}"));
             return;
         }
 
@@ -221,7 +260,87 @@ impl App {
             }
         }
 
-        self.status = StatusMessage::Info(format!("connection '{name}' added"));
+        self.status = StatusMessage::Info(format!(
+            "connection '{name}' {}",
+            if wizard.edit_target.is_some() { "updated" } else { "added" }
+        ));
         self.focus = Focus::Sidebar;
+    }
+
+    /// Opens the wizard pre-filled for the connection currently under the
+    /// sidebar cursor (tree mode only). No-op on any other node — editing
+    /// a favorite/database row doesn't make sense here.
+    pub(super) fn edit_selected_connection(&mut self) {
+        let nodes = self.sidebar_nodes();
+        let Some(super::SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
+            return;
+        };
+        let entry = self.conns[ci].entry.clone();
+        self.overlay = Some(Overlay::AddConnection(ConnWizard::for_edit(ci, &entry)));
+    }
+
+    /// Stages a confirmation for removing the connection under the
+    /// sidebar cursor. No-op on any other node.
+    pub(super) fn request_delete_selected_connection(&mut self) {
+        let nodes = self.sidebar_nodes();
+        let Some(super::SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
+            return;
+        };
+        let name = self.conns[ci].entry.name.clone();
+        self.overlay = Some(Overlay::ConfirmDeleteConnection { conn_idx: ci, name });
+    }
+
+    pub(super) fn on_confirm_delete_key(&mut self, conn_idx: usize, name: String, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.delete_connection(conn_idx, &name);
+            }
+            _ => {
+                self.status = StatusMessage::Info("cancelled".into());
+            }
+        }
+    }
+
+    /// Removes a connection entirely: config entry, stored keyring
+    /// password, any open tabs backed by it, and its background
+    /// heartbeat loop.
+    fn delete_connection(&mut self, idx: usize, name: &str) {
+        if idx >= self.conns.len() {
+            return;
+        }
+        if let Some(cancel) = self.conns[idx].heartbeat_cancel.take() {
+            cancel.cancel();
+        }
+        self.conns.remove(idx);
+
+        // Reindexing every open tab precisely across a removed connection
+        // is more complexity than this buys; falling back to the
+        // connection tree is always safe and the tabs reopen in a click.
+        self.active_tab = None;
+        self.tabs.retain(|t| t.conn_idx != idx);
+        for t in self.tabs.iter_mut() {
+            if t.conn_idx > idx {
+                t.conn_idx -= 1;
+            }
+        }
+        self.active_conn = match self.active_conn {
+            Some(c) if c == idx => None,
+            Some(c) if c > idx => Some(c - 1),
+            other => other,
+        };
+        self.sidebar_cursor = 0;
+        self.sidebar_scroll_top = 0;
+
+        if let Err(e) = crate::config::delete_password(name) {
+            self.status =
+                StatusMessage::Error(format!("connection '{name}' removed, but the stored password could not be deleted: {e}"));
+        }
+
+        let cfg = self.to_config();
+        if let Err(e) = crate::config::save(&cfg) {
+            self.status = StatusMessage::Error(format!("connection '{name}' removed, but config.toml could not be saved: {e}"));
+            return;
+        }
+        self.status = StatusMessage::Info(format!("connection '{name}' removed"));
     }
 }

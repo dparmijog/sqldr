@@ -54,6 +54,12 @@ impl App {
             KeyCode::Char('f') if !nodes.is_empty() => {
                 self.toggle_favorite_selected();
             }
+            KeyCode::Char('e') if !nodes.is_empty() => {
+                self.edit_selected_connection();
+            }
+            KeyCode::Char('d') if !nodes.is_empty() => {
+                self.request_delete_selected_connection();
+            }
             KeyCode::Up if !nodes.is_empty() => {
                 self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
             }
@@ -173,6 +179,10 @@ impl App {
             KeyCode::Enter if table_count > 0 => {
                 let ti = self.sidebar_cursor.min(table_count - 1);
                 self.preview_table(ci, di, ti);
+            }
+            KeyCode::Char('s') if table_count > 0 => {
+                let ti = self.sidebar_cursor.min(table_count - 1);
+                self.show_table_structure(ci, di, ti);
             }
             _ => {}
         }
@@ -306,6 +316,17 @@ impl App {
         // The default page (LIMIT 500) is a convenience, not a deliberate
         // query the user wants to recall later, so it doesn't get recorded.
         self.run_query(sql, source_table, false, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
+    }
+
+    /// Shows a read-only structure view (columns, indexes, foreign keys)
+    /// for a table already loaded in an open tab — no new query needed,
+    /// `Driver::tables` already fetched all of this.
+    pub(super) fn show_table_structure(&mut self, ci: usize, di: usize, ti: usize) {
+        let Some(tab) = self.tabs.iter().find(|t| t.conn_idx == ci && t.db_idx == di) else { return };
+        let TablesState::Loaded(tables) = &tab.tables else { return };
+        let Some(table) = tables.get(ti).cloned() else { return };
+        let db_name = tab.db_name.clone();
+        self.overlay = Some(super::Overlay::TableStructure { db_name, table });
     }
 
     /// Resolves whatever database is currently "selected" in the sidebar,

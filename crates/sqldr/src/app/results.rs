@@ -2,8 +2,9 @@
 //! through a previously-run query.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use sqldr_core::{Driver, ForeignKey};
 
-use super::{App, StatusMessage};
+use super::{App, ConnStatus, StatusMessage, TablesState};
 
 enum RowFormat {
     Json,
@@ -46,6 +47,7 @@ impl App {
             KeyCode::Char('Y') => self.copy_selected_row_as(RowFormat::Json),
             KeyCode::Char('c') => self.copy_selected_row_as(RowFormat::Csv),
             KeyCode::Char('i') => self.copy_selected_row_as(RowFormat::Insert),
+            KeyCode::Char('g') => self.follow_foreign_key(),
             KeyCode::PageDown => self.go_to_page(1),
             KeyCode::PageUp => self.go_to_page(-1),
             _ => {}
@@ -60,6 +62,66 @@ impl App {
         let Some(value) = row.values.get(self.results.cursor_col) else { return };
         let text = crate::clipboard::cell_text(value);
         self.report_copy(crate::clipboard::copy(&text), "cell");
+    }
+
+    /// Follows a foreign key from the cell under the cursor: looks up
+    /// whether the current column is a FK on the table this result set
+    /// was previewed from, then runs `SELECT * FROM ref_table WHERE
+    /// ref_col = <value>` — a "go to the referenced row" jump. Only
+    /// available for a table preview (needs `source_table`), and only
+    /// while that table's tab is still open (its `foreign_keys` metadata
+    /// lives there, already loaded — no extra query needed to look it up).
+    fn follow_foreign_key(&mut self) {
+        let Some(ci) = self.active_conn else {
+            self.status = StatusMessage::Error("no active connection".into());
+            return;
+        };
+        let Some((db, table)) = self.results.source_table.clone() else {
+            self.status = StatusMessage::Error(
+                "foreign-key navigation needs a table preview (open a table from the sidebar first)".into(),
+            );
+            return;
+        };
+        let Some(col_name) = self.results.cols.get(self.results.cursor_col).cloned() else { return };
+        let Some(value) = self
+            .results
+            .rows
+            .get(self.results.cursor_row)
+            .and_then(|r| r.values.get(self.results.cursor_col))
+            .cloned()
+        else {
+            self.status = StatusMessage::Error("no row selected".into());
+            return;
+        };
+
+        let Some(fk) = self.foreign_key_for(ci, &db, &table, &col_name) else {
+            self.status = StatusMessage::Error(format!("'{col_name}' is not a foreign key on {table}"));
+            return;
+        };
+
+        let Some(ConnStatus::Connected(driver)) = self.conns.get(ci).map(|c| &c.status) else {
+            self.status = StatusMessage::Error("connection not ready".into());
+            return;
+        };
+        let dialect = driver.dialect();
+        let sql = format!(
+            "SELECT * FROM {}.{} WHERE {} = {}",
+            dialect.quote_ident(&db),
+            dialect.quote_ident(&fk.ref_table),
+            dialect.quote_ident(&fk.ref_column),
+            crate::clipboard::sql_literal(&value),
+        );
+        let source_table = Some((db, fk.ref_table));
+        // A drill-down the user triggered by navigating, not a query they
+        // typed — don't record it again in history.
+        self.run_query(sql, source_table, false, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
+    }
+
+    fn foreign_key_for(&self, ci: usize, db: &str, table: &str, column: &str) -> Option<ForeignKey> {
+        let tab = self.tabs.iter().find(|t| t.conn_idx == ci && t.db_name == db)?;
+        let TablesState::Loaded(tables) = &tab.tables else { return None };
+        let t = tables.iter().find(|t| t.name == table)?;
+        t.foreign_keys.iter().find(|fk| fk.column == column).cloned()
     }
 
     fn copy_selected_row_as(&mut self, format: RowFormat) {

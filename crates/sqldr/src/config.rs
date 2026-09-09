@@ -108,6 +108,17 @@ pub fn set_password(conn_name: &str, password: &str) -> Result<()> {
     Ok(())
 }
 
+/// Removes any stored password for `conn_name`. A no-op (not an error) if
+/// none was ever stored.
+pub fn delete_password(conn_name: &str) -> Result<()> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, conn_name)?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Resolves a full connection URL by injecting a keyring-stored password
 /// when the configured URL doesn't already carry one.
 pub fn resolve_url(entry: &ConnEntry) -> Result<String> {

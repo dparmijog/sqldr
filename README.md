@@ -14,8 +14,10 @@ speaks exclusively to that trait, never to MySQL directly.
 - **Supported engine:** MySQL (via [`sqlx`](https://github.com/launchbadge/sqlx)).
 - **CLI:** `sqldr query`, `sqldr conn set-password`.
 - **TUI:** sidebar (connections → databases → per-table tabs), SQL editor,
-  paginated results, history, guardrails, mouse support, connection
-  creation wizard.
+  paginated results, history, guardrails, mouse support, a connection
+  wizard that can also edit/delete existing connections, a background
+  heartbeat that flags a dropped connection on its own, `EXPLAIN`,
+  and table-structure/foreign-key navigation.
 
 ## Requirements
 
@@ -92,6 +94,8 @@ With no subcommand, launches the interactive interface.
 |---|---|
 | `Tab` / `Shift+Tab` | cycle focus: sidebar → editor → results |
 | `↑`/`↓`/`Enter` in sidebar | navigate connections/databases; selecting a database opens a tab with its tables |
+| `e` / `d` on a connection | edit / delete that connection (with a confirmation before deleting) |
+| `s` on a table row | read-only structure view: columns, indexes, foreign keys |
 | `←`/`→` in a tab | switch between open database tabs |
 | `x` in a tab | close the active tab |
 | `Esc` in a tab | go back to the connection tree |
@@ -101,7 +105,9 @@ With no subcommand, launches the interactive interface.
 | `Ctrl+R` | query history for the active connection |
 | `Ctrl+E` | edit the query in `$EDITOR` |
 | `Ctrl+N` | wizard to add a new connection |
+| `Ctrl+X` | run the editor's query through `EXPLAIN` instead of executing it |
 | `PageUp`/`PageDown` in results | page through results (every `SELECT` without its own `LIMIT` gets an automatic 500-row one) |
+| `g` in results | follow a foreign-key cell to the referenced row (needs a table preview, not an arbitrary query) |
 | `y` / `Y` / `c` / `i` in results | copy cell / row as JSON / CSV / `INSERT` (via OSC 52, works over SSH) |
 | Mouse | click to focus/select, drag borders to resize sidebar/editor |
 | `q` | quit |

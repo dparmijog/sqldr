@@ -24,6 +24,49 @@ impl App {
         self.maybe_confirm_and_run(sql, None, true, unbounded);
     }
 
+    /// Runs the editor's current SQL through `EXPLAIN` instead of
+    /// executing it, showing the plan in the results pane. Bypasses the
+    /// mutation guard and `WHERE`-less confirmation entirely — `EXPLAIN`
+    /// never touches data, even for an `UPDATE`/`DELETE`, so it's safe on
+    /// a read-only connection too.
+    pub(super) fn run_editor_explain(&mut self) {
+        let sql = self.editor.lines().join("\n");
+        if sql.trim().is_empty() {
+            return;
+        }
+        let Some(ci) = self.active_conn else {
+            self.status = StatusMessage::Error("no active connection: pick one in the sidebar".into());
+            return;
+        };
+        let driver = match &self.conns[ci].status {
+            ConnStatus::Connected(driver) => Arc::clone(driver),
+            _ => {
+                self.status = StatusMessage::Error("connection not ready yet".into());
+                return;
+            }
+        };
+
+        self.results = ResultsState { running: true, ..ResultsState::default() };
+        self.status = StatusMessage::Running;
+
+        let tx = self.events.clone();
+        tokio::spawn(async move {
+            match driver.explain(&sql).await {
+                Ok(plan) => {
+                    for row in plan.rows {
+                        if tx.send(AppEvent::QueryRow(row)).is_err() {
+                            return;
+                        }
+                    }
+                    let _ = tx.send(AppEvent::QueryDone);
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::QueryError(e.to_string()));
+                }
+            }
+        });
+    }
+
     /// Runs `sql` immediately, unless it's an `UPDATE`/`DELETE` without a
     /// `WHERE` clause — then it's staged behind a confirmation overlay.
     /// `unbounded` skips auto-pagination entirely, running `sql` as typed.
@@ -265,6 +308,45 @@ impl App {
                 }
                 Err(e) => {
                     let _ = tx.send(AppEvent::ConnectError(ci, e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// Starts a periodic `SELECT 1` heartbeat for connection `ci`, so a
+    /// silently dropped connection (server-side timeout, network blip)
+    /// flips to `ConnStatus::Error` on its own instead of only being
+    /// noticed the next time the user tries to run a query. Cancels
+    /// whatever heartbeat loop was previously running for `ci` first —
+    /// reconnecting/editing a connection must never leave two loops
+    /// pinging in parallel.
+    pub(super) fn start_heartbeat(&mut self, ci: usize, driver: Arc<MySqlDriver>) {
+        if let Some(prev) = self.conns[ci].heartbeat_cancel.take() {
+            prev.cancel();
+        }
+        let cancel = CancellationToken::new();
+        self.conns[ci].heartbeat_cancel = Some(cancel.clone());
+        let tx = self.events.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
+                }
+                match driver.execute("SELECT 1").await {
+                    Ok(_) => {
+                        if tx.send(AppEvent::HeartbeatOk(ci)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        // The connection is dead; stop pinging it. The
+                        // user reconnects the normal way (Enter on the
+                        // now-`Error` node), which starts a fresh
+                        // heartbeat loop with a new cancellation token.
+                        let _ = tx.send(AppEvent::HeartbeatError(ci, e.to_string()));
+                        return;
+                    }
                 }
             }
         });

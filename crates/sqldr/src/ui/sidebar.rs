@@ -126,6 +126,13 @@ fn label(app: &App, node: &SidebarNode) -> String {
                 ConnStatus::Error(e) => {
                     format!("{arrow} {icon} {}{ro} — {e}", conn.entry.name)
                 }
+                ConnStatus::Connected(_) => {
+                    let ping = conn
+                        .last_ping
+                        .map(|t| format!(" ({}s)", t.elapsed().as_secs()))
+                        .unwrap_or_default();
+                    format!("{arrow} {icon} {}{ro}{ping}", conn.entry.name)
+                }
                 _ => format!("{arrow} {icon} {}{ro}", conn.entry.name),
             }
         }

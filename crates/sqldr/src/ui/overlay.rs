@@ -8,6 +8,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
+use sqldr_core::Table;
+
 use crate::app::{App, ConnField, ConnWizard, Engine, Overlay, WizardStep};
 use crate::theme::Theme;
 
@@ -33,6 +35,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Confirm { message, .. } => render_confirm(frame, theme, message),
         Overlay::AddConnection(form) => render_add_connection(frame, theme, form),
         Overlay::Settings { selected, .. } => render_settings(frame, theme, *selected),
+        Overlay::ConfirmDeleteConnection { name, .. } => render_confirm_delete(frame, theme, name),
+        Overlay::TableStructure { db_name, table } => render_table_structure(frame, theme, db_name, table),
     }
 }
 
@@ -213,4 +217,69 @@ fn render_settings(frame: &mut Frame, theme: Theme, selected: usize) {
     let mut state = ListState::default();
     state.select(Some(selected.min(Theme::ALL.len().saturating_sub(1))));
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_confirm_delete(frame: &mut Frame, theme: Theme, name: &str) {
+    let area = centered(60, 35, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title("Delete connection")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.error));
+
+    let lines = vec![
+        Line::from(format!("Remove '{name}'? This clears it from config.toml")),
+        Line::from("and deletes its stored password from the keyring."),
+        Line::default(),
+        Line::from(Span::styled(
+            "Enter/y: delete   any other key: cancel",
+            Style::default().add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Read-only table structure view (`s` on a table row): columns (with
+/// type/nullability/key), indexes, and foreign keys — all already
+/// present on the loaded [`Table`], so this needs no query of its own.
+fn render_table_structure(frame: &mut Frame, theme: Theme, db_name: &str, table: &Table) {
+    let area = centered(96, 80, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .title(format!("{db_name}.{} — structure (any key: close)", table.name))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+
+    let mut lines = vec![Line::from(Span::styled("Columns", Style::default().add_modifier(Modifier::BOLD)))];
+    for col in &table.columns {
+        let key = col.key.as_deref().unwrap_or("");
+        let nullable = if col.nullable { "NULL" } else { "NOT NULL" };
+        lines.push(Line::from(format!("  {:<24} {:<20} {nullable:<9} {key}", col.name, col.ty)));
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled("Indexes", Style::default().add_modifier(Modifier::BOLD))));
+    if table.indexes.is_empty() {
+        lines.push(Line::from("  (none)"));
+    } else {
+        for idx in &table.indexes {
+            lines.push(Line::from(format!("  {idx}")));
+        }
+    }
+
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled("Foreign keys", Style::default().add_modifier(Modifier::BOLD))));
+    if table.foreign_keys.is_empty() {
+        lines.push(Line::from("  (none)"));
+    } else {
+        for fk in &table.foreign_keys {
+            lines.push(Line::from(format!("  {} -> {}.{}", fk.column, fk.ref_table, fk.ref_column)));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
