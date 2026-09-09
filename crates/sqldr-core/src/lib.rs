@@ -8,6 +8,6 @@ pub use history::{History, HistoryEntry};
 pub use pagination::{paginate, DEFAULT_PAGE_SIZE};
 
 pub use driver::{
-    Column, ConnConfig, Dialect, Driver, Plan, Row, Schema, Table, Value,
+    Column, ConnConfig, Dialect, Driver, ForeignKey, Plan, Row, Schema, Table, Value,
 };
 pub use mysql::MySqlDriver;

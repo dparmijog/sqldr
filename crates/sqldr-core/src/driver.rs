@@ -64,10 +64,18 @@ pub struct Column {
 }
 
 #[derive(Debug, Clone)]
+pub struct ForeignKey {
+    pub column: String,
+    pub ref_table: String,
+    pub ref_column: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Table {
     pub name: String,
     pub columns: Vec<Column>,
     pub indexes: Vec<String>,
+    pub foreign_keys: Vec<ForeignKey>,
 }
 
 /// Database names visible on the server — cheap to load (no table walk),
@@ -113,11 +121,11 @@ pub trait Driver: Send + Sync {
 
     async fn schema(&self) -> anyhow::Result<Schema>;
 
-    /// Loads every table in `db_name` (columns + indexes). Deliberately
-    /// separate from `schema()`, which only lists database names — a
-    /// server with many databases/tables would otherwise pay for walking
-    /// `information_schema` for every table in every database just to
-    /// expand one connection in the sidebar.
+    /// Loads every table in `db_name` (columns + indexes + foreign keys).
+    /// Deliberately separate from `schema()`, which only lists database
+    /// names — a server with many databases/tables would otherwise pay
+    /// for walking `information_schema` for every table in every database
+    /// just to expand one connection in the sidebar.
     async fn tables(&self, db_name: &str) -> anyhow::Result<Vec<Table>>;
 
     /// Lists databases/schemas visible on the server. Identical in cost to

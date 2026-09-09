@@ -6,7 +6,7 @@ use sqlx::mysql::{MySqlPool, MySqlRow};
 use sqlx::{Column as _, Row as _, TypeInfo as _};
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::{Column, ConnConfig, Dialect, Driver, Plan, Row, Schema, Table, Value};
+use crate::driver::{Column, ConnConfig, Dialect, Driver, ForeignKey, Plan, Row, Schema, Table, Value};
 
 pub struct MySqlDialect;
 
@@ -168,10 +168,10 @@ impl Driver for MySqlDriver {
             .map(|r| text_col(r, 0))
             .collect::<anyhow::Result<Vec<_>>>()?;
 
-        // One query for every table's columns and one for every table's
-        // indexes — instead of two round trips per table — so opening a
-        // database with hundreds of tables costs three queries total, not
-        // `2 * tables + 1`.
+        // One query for every table's columns, one for every table's
+        // indexes, and one for every table's foreign keys — instead of
+        // per-table round trips — so opening a database with hundreds of
+        // tables costs four queries total, not `3 * tables + 1`.
         let col_rows = sqlx::query(
             "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
                     NULLIF(COLUMN_KEY, '') \
@@ -208,12 +208,34 @@ impl Driver for MySqlDriver {
             indexes_by_table.entry(table_name).or_default().push(text_col(r, 1)?);
         }
 
+        let fk_rows = sqlx::query(
+            "SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME \
+             FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY TABLE_NAME, COLUMN_NAME",
+        )
+        .bind(db_name)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut fks_by_table: std::collections::HashMap<String, Vec<ForeignKey>> =
+            std::collections::HashMap::new();
+        for r in &fk_rows {
+            let table_name = text_col(r, 0)?;
+            let fk = ForeignKey {
+                column: text_col(r, 1)?,
+                ref_table: text_col(r, 2)?,
+                ref_column: text_col(r, 3)?,
+            };
+            fks_by_table.entry(table_name).or_default().push(fk);
+        }
+
         let tables = table_names
             .into_iter()
             .map(|name| {
                 let columns = columns_by_table.remove(&name).unwrap_or_default();
                 let indexes = indexes_by_table.remove(&name).unwrap_or_default();
-                Table { name, columns, indexes }
+                let foreign_keys = fks_by_table.remove(&name).unwrap_or_default();
+                Table { name, columns, indexes, foreign_keys }
             })
             .collect();
 
