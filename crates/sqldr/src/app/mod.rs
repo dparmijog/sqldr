@@ -251,7 +251,7 @@ pub enum WizardStep {
     SelectDatabase { databases: Vec<String>, selected: usize },
 }
 
-/// Form state for the "nueva conexión" modal (`Ctrl+N`).
+/// Form state for the "add connection" modal (`Ctrl+N`).
 pub struct ConnWizard {
     pub step: WizardStep,
     pub engine: Engine,
@@ -393,7 +393,7 @@ pub struct App {
 impl App {
     pub fn new(config: Config, favorites: Favorites, events: mpsc::UnboundedSender<AppEvent>) -> Self {
         let mut editor = TextArea::default();
-        editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+        editor.set_placeholder_text("-- write SQL, Ctrl+Enter to run");
         let theme = Theme::by_name(config.theme.as_deref().unwrap_or(""));
         App {
             conns: config.connections.into_iter().map(ConnState::new).collect(),
@@ -439,7 +439,7 @@ impl App {
     fn persist_favorites(&mut self) {
         let result = crate::config::favorites_path().and_then(|path| self.favorites.save(&path));
         if let Err(e) = result {
-            self.status = StatusMessage::Error(format!("no se pudo guardar favoritos: {e}"));
+            self.status = StatusMessage::Error(format!("could not save favorites: {e}"));
         }
     }
 
@@ -559,7 +559,7 @@ impl App {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
                     tab.tables = TablesState::Error(e.clone());
                 }
-                self.status = StatusMessage::Error(format!("tablas de '{db_name}': {e}"));
+                self.status = StatusMessage::Error(format!("tables for '{db_name}': {e}"));
             }
             AppEvent::SchemaError(ci, e) => {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
@@ -567,7 +567,7 @@ impl App {
             }
             AppEvent::ConnectError(ci, e) => {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
-                self.status = StatusMessage::Error(format!("conectando '{}': {e}", self.conns[ci].entry.name));
+                self.status = StatusMessage::Error(format!("connecting '{}': {e}", self.conns[ci].entry.name));
             }
             AppEvent::WizardTested(id, result) => {
                 let is_current = matches!(
@@ -588,7 +588,7 @@ impl App {
                     }
                     Err(e) => {
                         wizard.step = WizardStep::Details;
-                        wizard.error = Some(format!("no se pudo conectar: {e}"));
+                        wizard.error = Some(format!("could not connect: {e}"));
                     }
                 }
                 self.overlay = Some(Overlay::AddConnection(wizard));

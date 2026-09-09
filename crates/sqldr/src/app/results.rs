@@ -14,9 +14,9 @@ enum RowFormat {
 impl RowFormat {
     fn label(&self) -> &'static str {
         match self {
-            RowFormat::Json => "fila (JSON)",
-            RowFormat::Csv => "fila (CSV)",
-            RowFormat::Insert => "fila (INSERT)",
+            RowFormat::Json => "row (JSON)",
+            RowFormat::Csv => "row (CSV)",
+            RowFormat::Insert => "row (INSERT)",
         }
     }
 }
@@ -54,17 +54,17 @@ impl App {
 
     fn copy_selected_cell(&mut self) {
         let Some(row) = self.results.rows.get(self.results.cursor_row) else {
-            self.status = StatusMessage::Error("sin fila seleccionada".into());
+            self.status = StatusMessage::Error("no row selected".into());
             return;
         };
         let Some(value) = row.values.get(self.results.cursor_col) else { return };
         let text = crate::clipboard::cell_text(value);
-        self.report_copy(crate::clipboard::copy(&text), "celda");
+        self.report_copy(crate::clipboard::copy(&text), "cell");
     }
 
     fn copy_selected_row_as(&mut self, format: RowFormat) {
         let Some(row) = self.results.rows.get(self.results.cursor_row) else {
-            self.status = StatusMessage::Error("sin fila seleccionada".into());
+            self.status = StatusMessage::Error("no row selected".into());
             return;
         };
         let text = match format {
@@ -73,7 +73,7 @@ impl App {
             RowFormat::Insert => {
                 let Some((db, table)) = &self.results.source_table else {
                     self.status = StatusMessage::Error(
-                        "INSERT no disponible: esta consulta no viene de una tabla".into(),
+                        "INSERT not available: this query didn't come from a table".into(),
                     );
                     return;
                 };
@@ -85,15 +85,15 @@ impl App {
 
     fn report_copy(&mut self, result: std::io::Result<()>, what: &str) {
         self.status = match result {
-            Ok(()) => StatusMessage::Info(format!("{what} copiada (OSC 52)")),
-            Err(e) => StatusMessage::Error(format!("copiando {what}: {e}")),
+            Ok(()) => StatusMessage::Info(format!("{what} copied (OSC 52)")),
+            Err(e) => StatusMessage::Error(format!("copying {what}: {e}")),
         };
     }
 
     /// Re-runs a paginated result set's base query at a different page.
     fn go_to_page(&mut self, delta: i64) {
         let Some(pagination) = self.results.pagination.clone() else {
-            self.status = StatusMessage::Error("paginación no disponible para esta consulta".into());
+            self.status = StatusMessage::Error("pagination not available for this query".into());
             return;
         };
         let new_page = if delta < 0 {

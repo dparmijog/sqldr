@@ -26,26 +26,26 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
             };
             spans.push(Span::styled(format!(" {} [{state}] ", conn.entry.name), style));
         }
-        None => spans.push(Span::raw(" sin conexión ")),
+        None => spans.push(Span::raw(" no connection ")),
     }
 
     let focus_name = match app.focus {
         Focus::Sidebar => "sidebar",
         Focus::Editor => "editor",
-        Focus::Results => "resultados",
+        Focus::Results => "results",
     };
-    spans.push(Span::raw(format!(" | foco: {focus_name}")));
+    spans.push(Span::raw(format!(" | focus: {focus_name}")));
 
     spans.push(Span::raw(" | "));
     match &app.status {
-        StatusMessage::Idle => spans.push(Span::raw("listo")),
-        StatusMessage::Running => spans.push(Span::styled("ejecutando…", Style::default().fg(app.theme.warning))),
+        StatusMessage::Idle => spans.push(Span::raw("ready")),
+        StatusMessage::Running => spans.push(Span::styled("running…", Style::default().fg(app.theme.warning))),
         StatusMessage::Error(e) => spans.push(Span::styled(format!("error: {e}"), Style::default().fg(app.theme.error))),
         StatusMessage::Info(m) => spans.push(Span::raw(m.clone())),
     }
 
     spans.push(Span::raw(
-        " | Tab: foco  f: favorito  Ctrl+Enter/F5: ejecutar  Ctrl+C: cancelar  Ctrl+R: historial  Ctrl+N: nueva conexión  Ctrl+O: opciones  Ctrl+E: $EDITOR  q: salir",
+        " | Tab: focus  f: favorite  Ctrl+Enter/F5: run  Ctrl+C: cancel  Ctrl+R: history  Ctrl+N: new connection  Ctrl+O: options  Ctrl+E: $EDITOR  q: quit",
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

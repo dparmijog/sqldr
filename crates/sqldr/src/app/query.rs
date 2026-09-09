@@ -30,7 +30,7 @@ impl App {
     fn maybe_confirm_and_run(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool, unbounded: bool) {
         if needs_where_confirmation(&sql) {
             self.overlay = Some(Overlay::Confirm {
-                message: format!("Sin WHERE — ¿ejecutar de todas formas?\n\n{sql}"),
+                message: format!("No WHERE clause — run anyway?\n\n{sql}"),
                 sql,
                 source_table,
                 record_history,
@@ -53,7 +53,7 @@ impl App {
                 self.run_query(sql, source_table, record_history, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
             }
             _ => {
-                self.status = StatusMessage::Info("cancelado".into());
+                self.status = StatusMessage::Info("cancelled".into());
             }
         }
     }
@@ -96,7 +96,7 @@ impl App {
 
     pub(super) fn open_history_picker(&mut self) {
         let Some(ci) = self.active_conn else {
-            self.status = StatusMessage::Error("sin conexión activa".into());
+            self.status = StatusMessage::Error("no active connection".into());
             return;
         };
         let name = self.conns[ci].entry.name.clone();
@@ -125,7 +125,7 @@ impl App {
         self.editor = tui_textarea::TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
         self.editor.move_cursor(tui_textarea::CursorMove::Bottom);
         self.editor.move_cursor(tui_textarea::CursorMove::End);
-        self.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+        self.editor.set_placeholder_text("-- write SQL, Ctrl+Enter to run");
     }
 
     /// `pagination_request` is `Some((page, page_size))` to auto-paginate
@@ -140,7 +140,7 @@ impl App {
         pagination_request: Option<(usize, u64)>,
     ) {
         let Some(ci) = self.active_conn else {
-            self.status = StatusMessage::Error("sin conexión activa: elige una en el sidebar".into());
+            self.status = StatusMessage::Error("no active connection: pick one in the sidebar".into());
             return;
         };
         let (read_only, name) = {
@@ -149,14 +149,14 @@ impl App {
         };
         if read_only && is_mutating(&sql) {
             self.status = StatusMessage::Error(format!(
-                "'{name}' es read-only; la sentencia parece una escritura"
+                "'{name}' is read-only; that statement looks like a write"
             ));
             return;
         }
         let driver = match &self.conns[ci].status {
             ConnStatus::Connected(driver) => Arc::clone(driver),
             _ => {
-                self.status = StatusMessage::Error("conexión aún no lista".into());
+                self.status = StatusMessage::Error("connection not ready yet".into());
                 return;
             }
         };
@@ -212,7 +212,7 @@ impl App {
     pub(super) fn cancel_running_query(&mut self) {
         if let Some(cancel) = self.cancel.take() {
             cancel.cancel();
-            self.status = StatusMessage::Info("query cancelada".into());
+            self.status = StatusMessage::Info("query cancelled".into());
             self.results.running = false;
         }
     }

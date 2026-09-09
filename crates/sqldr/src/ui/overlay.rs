@@ -40,7 +40,7 @@ fn render_history(frame: &mut Frame, theme: Theme, picker: &crate::app::HistoryP
     let area = centered(90, 70, frame.area());
     frame.render_widget(Clear, area);
 
-    let title = format!("Historial — filtro: {}_", picker.filter);
+    let title = format!("History — filter: {}_", picker.filter);
     let matches = picker.filtered();
     let items: Vec<ListItem> = matches
         .iter()
@@ -66,14 +66,14 @@ fn render_confirm(frame: &mut Frame, theme: Theme, message: &str) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Confirmar")
+        .title("Confirm")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.error));
 
     let mut lines: Vec<Line> = message.lines().map(Line::from).collect();
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "Enter/y: ejecutar   cualquier otra tecla: cancelar",
+        "Enter/y: run   any other key: cancel",
         Style::default().add_modifier(Modifier::ITALIC),
     )));
 
@@ -98,7 +98,7 @@ fn render_select_engine(frame: &mut Frame, theme: Theme, selected: usize) {
 
     let items: Vec<ListItem> = Engine::ALL.iter().map(|e| ListItem::new(e.label())).collect();
     let block = Block::default()
-        .title("Nueva conexión — elegí el motor (Esc: cancelar)")
+        .title("New connection — pick the engine (Esc: cancel)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
     let list = List::new(items).block(block).highlight_style(highlight_style(theme));
@@ -114,7 +114,7 @@ fn render_connection_details(frame: &mut Frame, theme: Theme, wizard: &ConnWizar
 
     let block = Block::default()
         .title(format!(
-            "Nueva conexión: {} (Ctrl+S: probar y continuar, Esc: atrás)",
+            "New connection: {} (Ctrl+S: test and continue, Esc: back)",
             wizard.engine.label()
         ))
         .borders(Borders::ALL)
@@ -132,21 +132,21 @@ fn render_connection_details(frame: &mut Frame, theme: Theme, wizard: &ConnWizar
     };
 
     let mut lines = vec![
-        text_line("Nombre", &wizard.name, ConnField::Name, false),
+        text_line("Name", &wizard.name, ConnField::Name, false),
         text_line("Host", &wizard.host, ConnField::Host, false),
-        text_line("Puerto", &wizard.port, ConnField::Port, false),
-        text_line("Usuario", &wizard.user, ConnField::User, false),
+        text_line("Port", &wizard.port, ConnField::Port, false),
+        text_line("User", &wizard.user, ConnField::User, false),
         text_line("Password", &wizard.password, ConnField::Password, true),
         Line::from(vec![
             Span::raw(format!("{:<10}", "Read-only")),
             Span::styled(
-                if wizard.read_only { "[x] (espacio para cambiar)" } else { "[ ] (espacio para cambiar)" },
+                if wizard.read_only { "[x] (space to toggle)" } else { "[ ] (space to toggle)" },
                 field_style(ConnField::ReadOnly),
             ),
         ]),
         Line::default(),
-        Line::from("Tab/↓: siguiente campo   Shift+Tab/↑: anterior"),
-        Line::from("La base de datos se elige después de probar la conexión."),
+        Line::from("Tab/↓: next field   Shift+Tab/↑: previous"),
+        Line::from("The database is chosen after testing the connection."),
     ];
     if let Some(err) = &wizard.error {
         lines.push(Line::default());
@@ -162,14 +162,14 @@ fn render_testing(frame: &mut Frame, theme: Theme, wizard: &ConnWizard) {
     frame.render_widget(Clear, area);
 
     let block = Block::default()
-        .title("Probando conexión (Esc: cancelar)")
+        .title("Testing connection (Esc: cancel)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.warning));
 
     let host = if wizard.host.trim().is_empty() { "127.0.0.1" } else { wizard.host.trim() };
     let message = format!(
-        "Conectando a {}@{}:{} ({})…",
-        if wizard.user.trim().is_empty() { "(sin usuario)" } else { wizard.user.trim() },
+        "Connecting to {}@{}:{} ({})…",
+        if wizard.user.trim().is_empty() { "(no user)" } else { wizard.user.trim() },
         host,
         wizard.port,
         wizard.engine.label()
@@ -182,11 +182,11 @@ fn render_select_database(frame: &mut Frame, theme: Theme, databases: &[String],
     let area = centered(60, 60, frame.area());
     frame.render_widget(Clear, area);
 
-    let mut items = vec![ListItem::new("(sin base de datos por defecto)")];
+    let mut items = vec![ListItem::new("(no default database)")];
     items.extend(databases.iter().map(|db| ListItem::new(db.as_str())));
 
     let block = Block::default()
-        .title("Elegí una base de datos (Enter: guardar, Esc: atrás)")
+        .title("Pick a database (Enter: save, Esc: back)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
     let list = List::new(items).block(block).highlight_style(highlight_style(theme));
@@ -205,7 +205,7 @@ fn render_settings(frame: &mut Frame, theme: Theme, selected: usize) {
 
     let items: Vec<ListItem> = Theme::ALL.iter().map(|t| ListItem::new(t.name)).collect();
     let block = Block::default()
-        .title("Opciones — Tema (↑/↓: previsualizar, Enter: guardar, Esc: cancelar)")
+        .title("Options — Theme (↑/↓: preview, Enter: save, Esc: cancel)")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
     let list = List::new(items).block(block).highlight_style(highlight_style(theme));

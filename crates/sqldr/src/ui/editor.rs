@@ -13,7 +13,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let mut editor = app.editor.clone();
     editor.set_block(
         Block::default()
-            .title("Editor (Ctrl+Enter ejecuta)")
+            .title("Editor (Ctrl+Enter to run)")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border_color)),
     );

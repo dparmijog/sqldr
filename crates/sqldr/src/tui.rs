@@ -118,7 +118,7 @@ async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_ke
     let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     let tmp_path = std::env::temp_dir().join(format!("sqldr-{}.sql", std::process::id()));
     if let Err(e) = std::fs::write(&tmp_path, app.editor.lines().join("\n")) {
-        app.status = crate::app::StatusMessage::Error(format!("no se pudo crear archivo temporal: {e}"));
+        app.status = crate::app::StatusMessage::Error(format!("could not create temp file: {e}"));
         return Ok(());
     }
 
@@ -158,17 +158,17 @@ async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_ke
         Ok(exit) if exit.success() => match std::fs::read_to_string(&tmp_path) {
             Ok(content) => {
                 app.set_editor_sql(&content);
-                app.status = crate::app::StatusMessage::Info(format!("editado en {editor_cmd}"));
+                app.status = crate::app::StatusMessage::Info(format!("edited in {editor_cmd}"));
             }
             Err(e) => {
-                app.status = crate::app::StatusMessage::Error(format!("no se pudo leer de vuelta: {e}"));
+                app.status = crate::app::StatusMessage::Error(format!("could not read it back: {e}"));
             }
         },
         Ok(_) => {
-            app.status = crate::app::StatusMessage::Info(format!("{editor_cmd} salió sin guardar"));
+            app.status = crate::app::StatusMessage::Info(format!("{editor_cmd} exited without saving"));
         }
         Err(e) => {
-            app.status = crate::app::StatusMessage::Error(format!("no se pudo ejecutar '{editor_cmd}': {e}"));
+            app.status = crate::app::StatusMessage::Error(format!("could not run '{editor_cmd}': {e}"));
         }
     }
 

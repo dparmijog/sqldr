@@ -255,7 +255,7 @@ impl App {
     /// `pending_open`).
     fn open_pinned_database(&mut self, db_ref: DbRef) {
         let Some(ci) = self.conns.iter().position(|c| c.entry.name == db_ref.conn) else {
-            self.status = StatusMessage::Error(format!("conexión '{}' ya no existe", db_ref.conn));
+            self.status = StatusMessage::Error(format!("connection '{}' no longer exists", db_ref.conn));
             return;
         };
         self.active_conn = Some(ci);
@@ -265,7 +265,7 @@ impl App {
             if matches!(self.conns[ci].status, ConnStatus::Idle | ConnStatus::Error(_)) {
                 self.connect_and_load_schema(ci);
             }
-            self.status = StatusMessage::Info(format!("conectando a '{}'…", self.conns[ci].entry.name));
+            self.status = StatusMessage::Info(format!("connecting to '{}'…", self.conns[ci].entry.name));
             return;
         }
         self.open_pinned_database_from_schema(ci);
@@ -280,7 +280,7 @@ impl App {
         let Some(schema) = &self.conns[ci].schema else { return };
         let Some(di) = schema.databases.iter().position(|name| *name == db_ref.db) else {
             self.status = StatusMessage::Error(format!(
-                "base de datos '{}' no encontrada en '{}'",
+                "database '{}' not found on '{}'",
                 db_ref.db, db_ref.conn
             ));
             return;
@@ -294,7 +294,7 @@ impl App {
         let Some(table_name) = tables.get(ti).map(|t| t.name.clone()) else { return };
         let db_name = tab.db_name.clone();
         let Some(ConnStatus::Connected(driver)) = self.conns.get(ci).map(|c| &c.status) else {
-            self.status = StatusMessage::Error("conexión no lista".into());
+            self.status = StatusMessage::Error("connection not ready".into());
             return;
         };
         let dialect = driver.dialect();
@@ -356,9 +356,9 @@ impl App {
         let now_favorite = self.favorites.toggle(db_ref.clone());
         self.persist_favorites();
         self.status = StatusMessage::Info(if now_favorite {
-            format!("\u{2605} agregada a favoritos: {}", db_ref.label())
+            format!("\u{2605} added to favorites: {}", db_ref.label())
         } else {
-            format!("quitada de favoritos: {}", db_ref.label())
+            format!("removed from favorites: {}", db_ref.label())
         });
         // Favoriting/unfavoriting inserts or removes a pinned row above
         // the tree, shifting every index below it — follow the cursor to

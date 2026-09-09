@@ -17,7 +17,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let (title, labels): (String, Vec<String>) = if let Some(filter) = &app.sidebar_filter {
         if let Some(active) = app.active_tab {
             let matches = app.sidebar_table_search_matches();
-            let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
+            let title = format!("Search table: {filter}_  ({} — Esc: exit)", matches.len());
             let empty_tables = Vec::new();
             let tables = match &app.tabs[active].tables {
                 TablesState::Loaded(tables) => tables,
@@ -27,7 +27,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             (title, labels)
         } else {
             let matches = app.sidebar_database_search_matches();
-            let title = format!("Buscar base de datos: {filter}_  ({} — Esc: salir)", matches.len());
+            let title = format!("Search database: {filter}_  ({} — Esc: exit)", matches.len());
             let labels =
                 matches.iter().map(|&(ci, di)| app.sidebar_database_search_label(ci, di)).collect();
             (title, labels)
@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         let nodes = app.sidebar_nodes();
         let labels = nodes.iter().map(|node| label(app, node)).collect();
-        ("Conexiones (/ busca bases de datos)".to_string(), labels)
+        ("Connections (/ search databases)".to_string(), labels)
     };
 
     // Keep the cursor inside the visible window, scrolling the minimum
@@ -93,13 +93,13 @@ fn tab_title(app: &App, active: usize) -> String {
             if i == active { format!("[{name}]") } else { name }
         })
         .collect();
-    format!("{}  (←/→: tab  x: cerrar  Esc: conexiones)", crumbs.join("  "))
+    format!("{}  (←/→: tab  x: close  Esc: connections)", crumbs.join("  "))
 }
 
 fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
     match &app.tabs[active].tables {
-        TablesState::Loading => vec!["cargando tablas…".to_string()],
-        TablesState::Error(e) => vec![format!("error cargando tablas: {e}")],
+        TablesState::Loading => vec!["loading tables…".to_string()],
+        TablesState::Error(e) => vec![format!("error loading tables: {e}")],
         TablesState::Loaded(tables) => tables.iter().map(|t| format!("\u{00b7} {}", t.name)).collect(),
     }
 }

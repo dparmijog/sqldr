@@ -13,7 +13,7 @@ use sqldr_core::{is_mutating, ConnConfig, Driver, MySqlDriver, Row};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
-#[command(name = "sqldr", version, about = "TUI + CLI para administrar bases de datos")]
+#[command(name = "sqldr", version, about = "TUI + CLI for managing databases")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -21,13 +21,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Ejecuta una query contra una conexión configurada e imprime las filas.
+    /// Runs a query against a configured connection and prints the rows.
     Query {
         #[arg(short = 'c', long = "conn")]
         connection: String,
         sql: String,
     },
-    /// Administra credenciales de conexiones.
+    /// Manages connection credentials.
     Conn {
         #[command(subcommand)]
         action: ConnAction,
@@ -36,7 +36,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ConnAction {
-    /// Guarda la contraseña de una conexión en el keyring del sistema.
+    /// Saves a connection's password in the system keyring.
     SetPassword {
         name: String,
         #[arg(long)]
@@ -61,12 +61,12 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
 
     if entry.read_only && is_mutating(sql) {
         anyhow::bail!(
-            "connection '{connection}' es read-only; '{sql}' parece una escritura"
+            "connection '{connection}' is read-only; '{sql}' looks like a write"
         );
     }
 
     if sqldr_core::needs_where_confirmation(sql) && !confirm_where(sql)? {
-        anyhow::bail!("cancelado por el usuario");
+        anyhow::bail!("cancelled by user");
     }
 
     let conn_cfg = ConnConfig {
@@ -101,8 +101,8 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
 /// but an explicit "y" (including EOF, e.g. non-interactive stdin).
 fn confirm_where(sql: &str) -> Result<bool> {
     use std::io::Write;
-    eprintln!("Sin WHERE — ¿ejecutar de todas formas?\n{sql}");
-    eprint!("Escribí 'y' para confirmar: ");
+    eprintln!("No WHERE clause — run anyway?\n{sql}");
+    eprint!("Type 'y' to confirm: ");
     std::io::stderr().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -117,7 +117,7 @@ async fn run_conn(action: ConnAction) -> Result<()> {
                 None => rpassword::prompt_password(format!("Password for '{name}': "))?,
             };
             config::set_password(&name, &password)?;
-            println!("Contraseña guardada para '{name}'.");
+            println!("Password saved for '{name}'.");
             Ok(())
         }
     }

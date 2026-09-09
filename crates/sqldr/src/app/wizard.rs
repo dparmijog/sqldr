@@ -18,7 +18,7 @@ impl App {
         match step {
             WizardStep::SelectEngine { selected } => match key.code {
                 KeyCode::Esc => {
-                    self.status = StatusMessage::Info("cancelado".into());
+                    self.status = StatusMessage::Info("cancelled".into());
                 }
                 KeyCode::Up => {
                     wizard.step = WizardStep::SelectEngine { selected: selected.saturating_sub(1) };
@@ -123,12 +123,12 @@ impl App {
     fn start_connection_test(&mut self, mut wizard: ConnWizard) {
         let name = wizard.name.trim().to_string();
         if name.is_empty() {
-            wizard.error = Some("el nombre es obligatorio".into());
+            wizard.error = Some("name is required".into());
             self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         }
         if self.conns.iter().any(|c| c.entry.name == name) {
-            wizard.error = Some(format!("ya existe una conexión llamada '{name}'"));
+            wizard.error = Some(format!("a connection named '{name}' already exists"));
             self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         }
@@ -139,7 +139,7 @@ impl App {
             wizard.port.trim().to_string()
         };
         let Ok(port) = port_str.parse::<u16>() else {
-            wizard.error = Some(format!("puerto inválido: '{port_str}'"));
+            wizard.error = Some(format!("invalid port: '{port_str}'"));
             self.overlay = Some(Overlay::AddConnection(wizard));
             return;
         };
@@ -148,7 +148,7 @@ impl App {
         let mut url = match url::Url::parse(&format!("mysql://{host}:{port}")) {
             Ok(u) => u,
             Err(e) => {
-                wizard.error = Some(format!("host/puerto inválido: {e}"));
+                wizard.error = Some(format!("invalid host/port: {e}"));
                 self.overlay = Some(Overlay::AddConnection(wizard));
                 return;
             }
@@ -194,7 +194,7 @@ impl App {
         let mut url = match url::Url::parse(&format!("mysql://{host}:{port_str}")) {
             Ok(u) => u,
             Err(e) => {
-                self.status = StatusMessage::Error(format!("URL inválida: {e}"));
+                self.status = StatusMessage::Error(format!("invalid URL: {e}"));
                 return;
             }
         };
@@ -210,18 +210,18 @@ impl App {
 
         let cfg = self.to_config();
         if let Err(e) = crate::config::save(&cfg) {
-            self.status = StatusMessage::Error(format!("conexión agregada pero no se pudo guardar config.toml: {e}"));
+            self.status = StatusMessage::Error(format!("connection added but config.toml could not be saved: {e}"));
             return;
         }
 
         if !wizard.password.is_empty() {
             if let Err(e) = crate::config::set_password(&name, &wizard.password) {
-                self.status = StatusMessage::Error(format!("conexión guardada, pero falló guardar la contraseña: {e}"));
+                self.status = StatusMessage::Error(format!("connection saved, but the password could not be saved: {e}"));
                 return;
             }
         }
 
-        self.status = StatusMessage::Info(format!("conexión '{name}' agregada"));
+        self.status = StatusMessage::Info(format!("connection '{name}' added"));
         self.focus = Focus::Sidebar;
     }
 }

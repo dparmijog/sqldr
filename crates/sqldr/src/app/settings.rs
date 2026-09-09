@@ -12,7 +12,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.theme = original;
-                self.status = StatusMessage::Info("cancelado".into());
+                self.status = StatusMessage::Info("cancelled".into());
             }
             KeyCode::Up => {
                 selected = selected.saturating_sub(1);
@@ -27,8 +27,8 @@ impl App {
             KeyCode::Enter => {
                 let cfg = self.to_config();
                 self.status = match crate::config::save(&cfg) {
-                    Ok(()) => StatusMessage::Info(format!("tema '{}' guardado", self.theme.name)),
-                    Err(e) => StatusMessage::Error(format!("no se pudo guardar el tema: {e}")),
+                    Ok(()) => StatusMessage::Info(format!("theme '{}' saved", self.theme.name)),
+                    Err(e) => StatusMessage::Error(format!("could not save theme: {e}")),
                 };
             }
             _ => {
