@@ -313,6 +313,19 @@ impl App {
         }
         self.conns.remove(idx);
 
+        // Every connection after `idx` just shifted down one slot, but
+        // its heartbeat task (if any) already captured its *old* index
+        // by value at spawn time — left alone, it would keep firing
+        // Heartbeat* events tagged with an index that now names a
+        // different connection. Respawn each one so its events carry the
+        // corrected index (`start_heartbeat` cancels the stale token).
+        for i in idx..self.conns.len() {
+            if let super::ConnStatus::Connected(driver) = &self.conns[i].status {
+                let driver = std::sync::Arc::clone(driver);
+                self.start_heartbeat(i, driver);
+            }
+        }
+
         // Reindexing every open tab precisely across a removed connection
         // is more complexity than this buys; falling back to the
         // connection tree is always safe and the tabs reopen in a click.
