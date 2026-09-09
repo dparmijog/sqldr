@@ -70,9 +70,13 @@ pub struct Table {
     pub indexes: Vec<String>,
 }
 
+/// Database names visible on the server — cheap to load (no table walk),
+/// used to populate the sidebar tree immediately on connect/expand.
+/// Each database's actual tables are fetched lazily via
+/// [`Driver::tables`], only once the user opens that database.
 #[derive(Debug, Clone)]
 pub struct Schema {
-    pub databases: Vec<(String, Vec<Table>)>,
+    pub databases: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,10 +113,18 @@ pub trait Driver: Send + Sync {
 
     async fn schema(&self) -> anyhow::Result<Schema>;
 
-    /// Lists databases/schemas visible on the server, without the cost of
-    /// walking every table inside them (unlike [`Driver::schema`]). Used by
-    /// the "add connection" wizard to let the user pick one after testing
-    /// credentials, before any database has been chosen.
+    /// Loads every table in `db_name` (columns + indexes). Deliberately
+    /// separate from `schema()`, which only lists database names — a
+    /// server with many databases/tables would otherwise pay for walking
+    /// `information_schema` for every table in every database just to
+    /// expand one connection in the sidebar.
+    async fn tables(&self, db_name: &str) -> anyhow::Result<Vec<Table>>;
+
+    /// Lists databases/schemas visible on the server. Identical in cost to
+    /// `schema()` (both are just a database-name listing); kept as its own
+    /// method because the "add connection" wizard wants a plain
+    /// `Vec<String>` before any connection is otherwise established in
+    /// `App` state, whereas the sidebar wants it wrapped in [`Schema`].
     async fn list_databases(&self) -> anyhow::Result<Vec<String>>;
 
     async fn explain(&self, sql: &str) -> anyhow::Result<Plan>;

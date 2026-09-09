@@ -217,6 +217,26 @@ impl App {
         }
     }
 
+    /// Fetches `db_name`'s tables in the background and reports the
+    /// result via `AppEvent::TablesLoaded`/`TablesError`, keyed by
+    /// `(ci, db_name)` so a closed/reopened tab can't be clobbered by a
+    /// stale in-flight request.
+    pub(super) fn load_tables_for(&mut self, ci: usize, db_name: String) {
+        let ConnStatus::Connected(driver) = &self.conns[ci].status else { return };
+        let driver = Arc::clone(driver);
+        let tx = self.events.clone();
+        tokio::spawn(async move {
+            match driver.tables(&db_name).await {
+                Ok(tables) => {
+                    let _ = tx.send(AppEvent::TablesLoaded(ci, db_name, tables));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::TablesError(ci, db_name, e.to_string()));
+                }
+            }
+        });
+    }
+
     pub(super) fn connect_and_load_schema(&mut self, ci: usize) {
         self.conns[ci].status = ConnStatus::Connecting;
         let entry = self.conns[ci].entry.clone();

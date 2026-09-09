@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
-use sqldr_core::{History, MySqlDriver, Row, Schema};
+use sqldr_core::{History, MySqlDriver, Row, Schema, Table};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
@@ -88,12 +88,24 @@ pub enum SidebarNode {
     Database(usize, usize),
 }
 
+/// Lazily-loaded table list for an open [`DbTab`]. Kept separate from the
+/// connection's [`Schema`] (database names only) so opening one database
+/// never pays for walking every table in every other database on the
+/// same server.
+pub enum TablesState {
+    Loading,
+    Loaded(Vec<Table>),
+    Error(String),
+}
+
 /// An open "use this database" tab: selecting a database in the
 /// connection tree opens (or switches to) one of these, and the sidebar
 /// then shows that database's tables instead of the tree.
 pub struct DbTab {
     pub conn_idx: usize,
     pub db_idx: usize,
+    pub db_name: String,
+    pub tables: TablesState,
 }
 
 /// Result of the most recent query run, shown in the results pane.
@@ -318,6 +330,12 @@ pub enum AppEvent {
     QueryError(String),
     SchemaLoaded(usize, Box<Schema>),
     SchemaError(usize, String),
+    /// Result of lazily loading one database's tables (see
+    /// [`TablesState`]). Keyed by `(conn_idx, db_name)` rather than a tab
+    /// index, since tabs can be closed/reordered while the request is in
+    /// flight.
+    TablesLoaded(usize, String, Vec<Table>),
+    TablesError(usize, String, String),
     Connected(usize, Arc<MySqlDriver>),
     ConnectError(usize, String),
     /// Result of testing credentials in the "add connection" wizard: the
@@ -530,15 +548,22 @@ impl App {
             }
             AppEvent::SchemaLoaded(ci, schema) => {
                 self.conns[ci].schema = Some(*schema);
-                if let Some(table_ref) = self.pending_open.take() {
-                    if self.conns[ci].entry.name == table_ref.conn {
-                        self.open_pinned_table_from_schema(ci, &table_ref);
-                    } else {
-                        // A different connection's schema finished loading
-                        // first; keep waiting for the right one.
-                        self.pending_open = Some(table_ref);
-                    }
+                if matches!(&self.pending_open, Some(t) if self.conns[ci].entry.name == t.conn) {
+                    self.open_pinned_table_from_schema(ci);
                 }
+            }
+            AppEvent::TablesLoaded(ci, db_name, tables) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
+                    tab.tables = TablesState::Loaded(tables);
+                }
+                self.try_resolve_pending_open();
+            }
+            AppEvent::TablesError(ci, db_name, e) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
+                    tab.tables = TablesState::Error(e.clone());
+                }
+                self.status = StatusMessage::Error(format!("tablas de '{db_name}': {e}"));
+                self.try_resolve_pending_open();
             }
             AppEvent::SchemaError(ci, e) => {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
@@ -779,5 +804,82 @@ mod tests {
 
         std::env::remove_var("SQLDR_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn conn_with_databases(name: &str, databases: Vec<String>) -> ConnState {
+        let mut conn = ConnState::new(ConnEntry { name: name.into(), url: "mysql://x".into(), read_only: false });
+        conn.schema = Some(Schema { databases });
+        conn
+    }
+
+    #[test]
+    fn opening_a_database_tab_starts_table_loading_lazily_not_eagerly() {
+        let mut app = test_app();
+        let mut conn = conn_with_databases("acme", vec!["billing".into()]);
+        conn.expanded = true;
+        app.conns.push(conn);
+        // sidebar_nodes(): [Connection(0), Database(0,0)] — no favorites/recents.
+        app.sidebar_cursor = 1;
+        app.activate_sidebar_node();
+
+        assert_eq!(app.tabs.len(), 1, "selecting a database must open its tab");
+        assert!(
+            matches!(app.tabs[0].tables, TablesState::Loading),
+            "tables must start Loading, never eagerly populated, when opening a database tab"
+        );
+        assert_eq!(app.active_tab_table_count(), 0, "table count must be 0 while still loading");
+    }
+
+    #[test]
+    fn database_search_matches_scoped_to_database_names_only() {
+        let mut app = test_app();
+        app.conns.push(conn_with_databases("acme", vec!["billing".into(), "reporting".into()]));
+        app.sidebar_filter = Some("bill".into());
+
+        let matches = app.sidebar_database_search_matches();
+        assert_eq!(matches.len(), 1, "must match only the database whose name contains the filter");
+        assert_eq!(app.sidebar_database_search_label(matches[0].0, matches[0].1), "acme/billing");
+    }
+
+    #[test]
+    fn table_search_is_scoped_to_the_open_tab_only() {
+        let mut app = test_app();
+        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.tabs.push(DbTab {
+            conn_idx: 0,
+            db_idx: 0,
+            db_name: "billing".into(),
+            tables: TablesState::Loaded(vec![
+                Table { name: "invoices".into(), columns: vec![], indexes: vec![] },
+                Table { name: "customers".into(), columns: vec![], indexes: vec![] },
+            ]),
+        });
+        app.active_tab = Some(0);
+        app.sidebar_filter = Some("inv".into());
+
+        let matches = app.sidebar_table_search_matches();
+        let TablesState::Loaded(tables) = &app.tabs[0].tables else { unreachable!() };
+        assert_eq!(matches.len(), 1);
+        assert_eq!(tables[matches[0]].name, "invoices");
+    }
+
+    #[test]
+    fn pending_open_resolves_once_tables_load_after_schema_and_tab_open() {
+        let mut app = test_app();
+        app.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
+        // Simulate opening a favorite before its connection has ever been expanded.
+        app.pending_open = Some(TableRef { conn: "acme".into(), db: "billing".into(), table: "invoices".into() });
+
+        app.on_app_event(AppEvent::SchemaLoaded(0, Box::new(Schema { databases: vec!["billing".into()] })));
+        assert_eq!(app.tabs.len(), 1, "resolving pending_open must open the matching db tab");
+        assert!(matches!(app.tabs[0].tables, TablesState::Loading));
+        assert!(app.pending_open.is_some(), "still waiting on tables to load");
+
+        app.on_app_event(AppEvent::TablesLoaded(
+            0,
+            "billing".into(),
+            vec![Table { name: "invoices".into(), columns: vec![], indexes: vec![] }],
+        ));
+        assert!(app.pending_open.is_none(), "pending_open must clear once the table is found and previewed");
     }
 }

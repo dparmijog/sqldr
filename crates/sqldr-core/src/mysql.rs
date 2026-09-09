@@ -152,67 +152,72 @@ impl Driver for MySqlDriver {
     }
 
     async fn schema(&self) -> anyhow::Result<Schema> {
-        let db_names = list_database_names(&self.pool).await?;
+        Ok(Schema { databases: list_database_names(&self.pool).await? })
+    }
 
-        let mut databases = Vec::with_capacity(db_names.len());
-        for db_name in db_names {
-            let table_rows = sqlx::query(
-                "SELECT TABLE_NAME FROM information_schema.TABLES \
-                 WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
-            )
-            .bind(&db_name)
-            .fetch_all(&self.pool)
-            .await?;
-            let table_names = table_rows
-                .iter()
-                .map(|r| text_col(r, 0))
-                .collect::<anyhow::Result<Vec<_>>>()?;
+    async fn tables(&self, db_name: &str) -> anyhow::Result<Vec<Table>> {
+        let table_rows = sqlx::query(
+            "SELECT TABLE_NAME FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
+        )
+        .bind(db_name)
+        .fetch_all(&self.pool)
+        .await?;
+        let table_names = table_rows
+            .iter()
+            .map(|r| text_col(r, 0))
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
-            let mut tables = Vec::with_capacity(table_names.len());
-            for table_name in table_names {
-                let col_rows = sqlx::query(
-                    "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
-                            NULLIF(COLUMN_KEY, '') \
-                     FROM information_schema.COLUMNS \
-                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
-                     ORDER BY ORDINAL_POSITION",
-                )
-                .bind(&db_name)
-                .bind(&table_name)
-                .fetch_all(&self.pool)
-                .await?;
-                let columns = col_rows
-                    .iter()
-                    .map(|r| {
-                        anyhow::Ok(Column {
-                            name: text_col(r, 0)?,
-                            ty: text_col(r, 1)?,
-                            nullable: text_col(r, 2)?.eq_ignore_ascii_case("YES"),
-                            key: opt_text_col(r, 3)?,
-                        })
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-
-                let idx_rows = sqlx::query(
-                    "SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS \
-                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY INDEX_NAME",
-                )
-                .bind(&db_name)
-                .bind(&table_name)
-                .fetch_all(&self.pool)
-                .await?;
-                let indexes = idx_rows
-                    .iter()
-                    .map(|r| text_col(r, 0))
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-
-                tables.push(Table { name: table_name, columns, indexes });
-            }
-
-            databases.push((db_name, tables));
+        // One query for every table's columns and one for every table's
+        // indexes — instead of two round trips per table — so opening a
+        // database with hundreds of tables costs three queries total, not
+        // `2 * tables + 1`.
+        let col_rows = sqlx::query(
+            "SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, \
+                    NULLIF(COLUMN_KEY, '') \
+             FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, ORDINAL_POSITION",
+        )
+        .bind(db_name)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut columns_by_table: std::collections::HashMap<String, Vec<Column>> =
+            std::collections::HashMap::new();
+        for r in &col_rows {
+            let table_name = text_col(r, 0)?;
+            let column = Column {
+                name: text_col(r, 1)?,
+                ty: text_col(r, 2)?,
+                nullable: text_col(r, 3)?.eq_ignore_ascii_case("YES"),
+                key: opt_text_col(r, 4)?,
+            };
+            columns_by_table.entry(table_name).or_default().push(column);
         }
 
-        Ok(Schema { databases })
+        let idx_rows = sqlx::query(
+            "SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME, INDEX_NAME",
+        )
+        .bind(db_name)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut indexes_by_table: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for r in &idx_rows {
+            let table_name = text_col(r, 0)?;
+            indexes_by_table.entry(table_name).or_default().push(text_col(r, 1)?);
+        }
+
+        let tables = table_names
+            .into_iter()
+            .map(|name| {
+                let columns = columns_by_table.remove(&name).unwrap_or_default();
+                let indexes = indexes_by_table.remove(&name).unwrap_or_default();
+                Table { name, columns, indexes }
+            })
+            .collect();
+
+        Ok(tables)
     }
 
     async fn list_databases(&self) -> anyhow::Result<Vec<String>> {

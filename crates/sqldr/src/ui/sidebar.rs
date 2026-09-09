@@ -1,29 +1,43 @@
-//! Sidebar: three modes sharing one list widget —
-//! connections/databases tree, an open database's table list ("tab"), and
-//! a flat table search (`/`).
+//! Sidebar: three modes sharing one list widget — pinned favorites/recents
+//! plus the connection/database tree, an open database's table list
+//! ("tab"), and a `/` search scoped to whichever of those is showing
+//! (database names in tree mode, table names in tab mode).
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
-use crate::app::{App, ConnStatus, Focus, SidebarNode};
+use crate::app::{App, ConnStatus, Focus, SidebarNode, TablesState};
 use crate::recents::TableRef;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
 
     let (title, labels): (String, Vec<String>) = if let Some(filter) = &app.sidebar_filter {
-        let matches = app.sidebar_search_matches();
-        let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
-        let labels = matches.iter().map(|&(ci, di, ti)| app.sidebar_search_label(ci, di, ti)).collect();
-        (title, labels)
+        if let Some(active) = app.active_tab {
+            let matches = app.sidebar_table_search_matches();
+            let title = format!("Buscar tabla: {filter}_  ({} — Esc: salir)", matches.len());
+            let empty_tables = Vec::new();
+            let tables = match &app.tabs[active].tables {
+                TablesState::Loaded(tables) => tables,
+                _ => &empty_tables,
+            };
+            let labels = matches.iter().filter_map(|&ti| tables.get(ti)).map(|t| t.name.clone()).collect();
+            (title, labels)
+        } else {
+            let matches = app.sidebar_database_search_matches();
+            let title = format!("Buscar base de datos: {filter}_  ({} — Esc: salir)", matches.len());
+            let labels =
+                matches.iter().map(|&(ci, di)| app.sidebar_database_search_label(ci, di)).collect();
+            (title, labels)
+        }
     } else if let Some(active) = app.active_tab {
         (tab_title(app, active), tab_table_labels(app, active))
     } else {
         let nodes = app.sidebar_nodes();
         let labels = nodes.iter().map(|node| label(app, node)).collect();
-        ("Conexiones (/ busca tablas)".to_string(), labels)
+        ("Conexiones (/ busca bases de datos)".to_string(), labels)
     };
 
     // Keep the cursor inside the visible window, scrolling the minimum
@@ -73,14 +87,7 @@ fn tab_title(app: &App, active: usize) -> String {
         .enumerate()
         .map(|(i, tab)| {
             let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
-            let db_name = app
-                .conns
-                .get(tab.conn_idx)
-                .and_then(|c| c.schema.as_ref())
-                .and_then(|s| s.databases.get(tab.db_idx))
-                .map(|(name, _)| name.as_str())
-                .unwrap_or("?");
-            let name = format!("{conn_name}/{db_name}");
+            let name = format!("{conn_name}/{}", tab.db_name);
             if i == active { format!("[{name}]") } else { name }
         })
         .collect();
@@ -89,23 +96,22 @@ fn tab_title(app: &App, active: usize) -> String {
 
 fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
     let tab = &app.tabs[active];
-    let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.clone()).unwrap_or_default();
-    app.conns
-        .get(tab.conn_idx)
-        .and_then(|c| c.schema.as_ref())
-        .and_then(|s| s.databases.get(tab.db_idx))
-        .map(|(db_name, tables)| {
+    match &tab.tables {
+        TablesState::Loading => vec!["cargando tablas…".to_string()],
+        TablesState::Error(e) => vec![format!("error cargando tablas: {e}")],
+        TablesState::Loaded(tables) => {
+            let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.clone()).unwrap_or_default();
             tables
                 .iter()
                 .map(|t| {
                     let table_ref =
-                        TableRef { conn: conn_name.clone(), db: db_name.clone(), table: t.name.clone() };
+                        TableRef { conn: conn_name.clone(), db: tab.db_name.clone(), table: t.name.clone() };
                     let marker = if app.recents.is_favorite(&table_ref) { "\u{2605}" } else { "\u{00b7}" };
                     format!("{marker} {}", t.name)
                 })
                 .collect()
-        })
-        .unwrap_or_default()
+        }
+    }
 }
 
 fn label(app: &App, node: &SidebarNode) -> String {
@@ -144,7 +150,7 @@ fn label(app: &App, node: &SidebarNode) -> String {
                 .schema
                 .as_ref()
                 .and_then(|s| s.databases.get(di))
-                .map(|(name, _)| name.as_str())
+                .map(|name| name.as_str())
                 .unwrap_or("?");
             format!("  ▸ {name}")
         }
