@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
 use crate::config::{ConnEntry, Config};
-use crate::recents::{RecentTables, TableRef};
+use crate::recents::{DbRef, RecentTables};
 use crate::theme::Theme;
 
 /// Which pane currently receives key input.
@@ -371,11 +371,11 @@ pub struct App {
     pub quit: bool,
     pub cancel: Option<CancellationToken>,
     pub overlay: Option<Overlay>,
-    /// Recently-viewed and favorited tables, pinned atop the sidebar tree.
+    /// Recently-opened and favorited databases, pinned atop the sidebar tree.
     pub recents: RecentTables,
-    /// A pinned-table open request waiting on its connection's schema to
-    /// finish loading (see `sidebar::open_pinned_table`).
-    pending_open: Option<TableRef>,
+    /// A pinned-database open request waiting on its connection's schema
+    /// to finish loading (see `sidebar::open_pinned_database`).
+    pending_open: Option<DbRef>,
     /// Active color palette; changed live from the options dialog
     /// (`Ctrl+O`) and persisted to `config.toml` on confirm.
     pub theme: Theme,
@@ -549,21 +549,19 @@ impl App {
             AppEvent::SchemaLoaded(ci, schema) => {
                 self.conns[ci].schema = Some(*schema);
                 if matches!(&self.pending_open, Some(t) if self.conns[ci].entry.name == t.conn) {
-                    self.open_pinned_table_from_schema(ci);
+                    self.open_pinned_database_from_schema(ci);
                 }
             }
             AppEvent::TablesLoaded(ci, db_name, tables) => {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
                     tab.tables = TablesState::Loaded(tables);
                 }
-                self.try_resolve_pending_open();
             }
             AppEvent::TablesError(ci, db_name, e) => {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
                     tab.tables = TablesState::Error(e.clone());
                 }
                 self.status = StatusMessage::Error(format!("tablas de '{db_name}': {e}"));
-                self.try_resolve_pending_open();
             }
             AppEvent::SchemaError(ci, e) => {
                 self.conns[ci].status = ConnStatus::Error(e.clone());
@@ -761,10 +759,10 @@ mod tests {
     #[test]
     fn sidebar_nodes_lists_favorites_then_recents_then_connections() {
         let mut app = test_app();
-        app.recents.favorites.push(TableRef { conn: "a".into(), db: "d".into(), table: "fav".into() });
-        app.recents.touch(TableRef { conn: "a".into(), db: "d".into(), table: "rec".into() });
+        app.recents.favorites.push(DbRef { conn: "a".into(), db: "fav".into() });
+        app.recents.touch(DbRef { conn: "a".into(), db: "rec".into() });
         // Also touched, but already favorited — must not appear twice.
-        app.recents.touch(TableRef { conn: "a".into(), db: "d".into(), table: "fav".into() });
+        app.recents.touch(DbRef { conn: "a".into(), db: "fav".into() });
 
         let nodes = app.sidebar_nodes();
         assert!(matches!(nodes[0], SidebarNode::Favorite(0)), "favorites come first");
@@ -772,7 +770,7 @@ mod tests {
         assert_eq!(
             nodes.iter().filter(|n| matches!(n, SidebarNode::Recent(_))).count(),
             1,
-            "a favorited table must not also show up under Recent"
+            "a favorited database must not also show up under Recent"
         );
     }
 
@@ -791,16 +789,16 @@ mod tests {
         std::env::set_var("SQLDR_DATA_DIR", &dir);
 
         let mut app = test_app();
-        let table_ref = TableRef { conn: "demo".into(), db: "db".into(), table: "widgets".into() };
-        app.recents.favorites.push(table_ref.clone());
+        let db_ref = DbRef { conn: "demo".into(), db: "billing".into() };
+        app.recents.favorites.push(db_ref.clone());
         app.sidebar_cursor = 0;
         assert!(matches!(app.sidebar_nodes().first(), Some(SidebarNode::Favorite(0))));
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
 
-        assert!(!app.recents.is_favorite(&table_ref), "f must un-favorite the selected pinned entry");
+        assert!(!app.recents.is_favorite(&db_ref), "f must un-favorite the selected pinned entry");
         let saved = RecentTables::load(&crate::config::recent_tables_path().unwrap());
-        assert!(!saved.is_favorite(&table_ref), "toggling favorite must persist to disk");
+        assert!(!saved.is_favorite(&db_ref), "toggling favorite must persist to disk");
 
         std::env::remove_var("SQLDR_DATA_DIR");
         let _ = std::fs::remove_dir_all(&dir);
@@ -864,22 +862,17 @@ mod tests {
     }
 
     #[test]
-    fn pending_open_resolves_once_tables_load_after_schema_and_tab_open() {
+    fn pending_open_resolves_once_schema_loads() {
         let mut app = test_app();
         app.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
-        // Simulate opening a favorite before its connection has ever been expanded.
-        app.pending_open = Some(TableRef { conn: "acme".into(), db: "billing".into(), table: "invoices".into() });
+        // Simulate opening a favorite database before its connection has
+        // ever been expanded.
+        app.pending_open = Some(DbRef { conn: "acme".into(), db: "billing".into() });
 
         app.on_app_event(AppEvent::SchemaLoaded(0, Box::new(Schema { databases: vec!["billing".into()] })));
-        assert_eq!(app.tabs.len(), 1, "resolving pending_open must open the matching db tab");
-        assert!(matches!(app.tabs[0].tables, TablesState::Loading));
-        assert!(app.pending_open.is_some(), "still waiting on tables to load");
 
-        app.on_app_event(AppEvent::TablesLoaded(
-            0,
-            "billing".into(),
-            vec![Table { name: "invoices".into(), columns: vec![], indexes: vec![] }],
-        ));
-        assert!(app.pending_open.is_none(), "pending_open must clear once the table is found and previewed");
+        assert_eq!(app.tabs.len(), 1, "resolving pending_open must open the matching db tab");
+        assert_eq!(app.tabs[0].db_name, "billing");
+        assert!(app.pending_open.is_none(), "pending_open must clear once the database tab is opened");
     }
 }

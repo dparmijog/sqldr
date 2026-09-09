@@ -1,6 +1,6 @@
-//! Sidebar: three modes sharing one list widget — pinned favorites/recents
-//! plus the connection/database tree, an open database's table list
-//! ("tab"), and a `/` search scoped to whichever of those is showing
+//! Sidebar: three modes sharing one list widget — pinned favorite/recent
+//! databases plus the connection/database tree, an open database's table
+//! list ("tab"), and a `/` search scoped to whichever of those is showing
 //! (database names in tree mode, table names in tab mode).
 
 use ratatui::layout::Rect;
@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
 use crate::app::{App, ConnStatus, Focus, SidebarNode, TablesState};
-use crate::recents::TableRef;
+use crate::recents::DbRef;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
@@ -78,8 +78,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// Breadcrumb title for tab mode: every open tab, the active one bracketed,
-/// plus the key hints for switching/closing tabs.
+/// Breadcrumb title for tab mode: every open tab, the active one bracketed
+/// and starred if favorited, plus the key hints for switching/closing tabs.
 fn tab_title(app: &App, active: usize) -> String {
     let crumbs: Vec<String> = app
         .tabs
@@ -87,7 +87,9 @@ fn tab_title(app: &App, active: usize) -> String {
         .enumerate()
         .map(|(i, tab)| {
             let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
-            let name = format!("{conn_name}/{}", tab.db_name);
+            let db_ref = DbRef { conn: conn_name.to_string(), db: tab.db_name.clone() };
+            let star = if app.recents.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            let name = format!("{star}{conn_name}/{}", tab.db_name);
             if i == active { format!("[{name}]") } else { name }
         })
         .collect();
@@ -95,22 +97,10 @@ fn tab_title(app: &App, active: usize) -> String {
 }
 
 fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
-    let tab = &app.tabs[active];
-    match &tab.tables {
+    match &app.tabs[active].tables {
         TablesState::Loading => vec!["cargando tablas…".to_string()],
         TablesState::Error(e) => vec![format!("error cargando tablas: {e}")],
-        TablesState::Loaded(tables) => {
-            let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.clone()).unwrap_or_default();
-            tables
-                .iter()
-                .map(|t| {
-                    let table_ref =
-                        TableRef { conn: conn_name.clone(), db: tab.db_name.clone(), table: t.name.clone() };
-                    let marker = if app.recents.is_favorite(&table_ref) { "\u{2605}" } else { "\u{00b7}" };
-                    format!("{marker} {}", t.name)
-                })
-                .collect()
-        }
+        TablesState::Loaded(tables) => tables.iter().map(|t| format!("\u{00b7} {}", t.name)).collect(),
     }
 }
 
@@ -120,13 +110,13 @@ fn label(app: &App, node: &SidebarNode) -> String {
             .recents
             .favorites
             .get(idx)
-            .map(|t| format!("\u{2605} {}", t.label()))
+            .map(|db| format!("\u{2605} {}", db.label()))
             .unwrap_or_else(|| "?".to_string()),
         SidebarNode::Recent(idx) => app
             .recents
             .recent_excluding_favorites()
             .get(idx)
-            .map(|t| format!("\u{00b7} {}", t.label()))
+            .map(|db| format!("\u{00b7} {}", db.label()))
             .unwrap_or_else(|| "?".to_string()),
         SidebarNode::Connection(ci) => {
             let conn = &app.conns[ci];
@@ -146,13 +136,11 @@ fn label(app: &App, node: &SidebarNode) -> String {
             }
         }
         SidebarNode::Database(ci, di) => {
-            let name = app.conns[ci]
-                .schema
-                .as_ref()
-                .and_then(|s| s.databases.get(di))
-                .map(|name| name.as_str())
-                .unwrap_or("?");
-            format!("  ▸ {name}")
+            let conn = &app.conns[ci];
+            let name = conn.schema.as_ref().and_then(|s| s.databases.get(di)).map(|name| name.as_str()).unwrap_or("?");
+            let db_ref = DbRef { conn: conn.entry.name.clone(), db: name.to_string() };
+            let star = if app.recents.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            format!("  ▸ {star}{name}")
         }
     }
 }
