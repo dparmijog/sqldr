@@ -6,8 +6,6 @@
 //! unless the user already wrote their own `LIMIT`, which is always
 //! respected as-is (no pagination controls offered for it).
 
-use crate::guard::contains_keyword;
-
 pub const DEFAULT_PAGE_SIZE: u64 = 500;
 
 /// True if `sql`'s leading keyword indicates a row-returning read query
@@ -18,13 +16,55 @@ fn is_paginable_statement(sql: &str) -> bool {
     head.starts_with("SELECT") || head.starts_with("WITH")
 }
 
+/// Scans for a `LIMIT` keyword at parenthesis depth 0 — i.e. one that
+/// applies to the outermost query, not one scoped to a subquery, CTE body,
+/// or parenthesized `UNION` branch (`SELECT * FROM (SELECT ... LIMIT 5) t`
+/// has no *top-level* limit and would otherwise run unbounded if a naive
+/// whole-string scan mistook the inner `LIMIT` for one that caps the outer
+/// query). Ignores occurrences inside string literals.
+fn has_top_level_limit(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    let mut depth: i32 = 0;
+    let mut in_string: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match in_string {
+            Some(quote) => {
+                if b == quote {
+                    in_string = None;
+                }
+            }
+            None => match b {
+                b'\'' | b'"' => in_string = Some(b),
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ if b.is_ascii_alphabetic() => {
+                    let start = i;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    if depth <= 0 && sql[start..i].eq_ignore_ascii_case("LIMIT") {
+                        return true;
+                    }
+                    continue;
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Builds the SQL to run for `page` (0-indexed) of `sql` at `page_size` rows
 /// per page. Returns `None` when `sql` isn't a plain read query, or already
-/// carries an explicit `LIMIT` — callers should run it unmodified in that
+/// carries a top-level `LIMIT` — callers should run it unmodified in that
 /// case and not offer pagination controls, since the user's own limit is
 /// authoritative.
 pub fn paginate(sql: &str, page: usize, page_size: u64) -> Option<String> {
-    if !is_paginable_statement(sql) || contains_keyword(sql, "LIMIT") {
+    if !is_paginable_statement(sql) || has_top_level_limit(sql) {
         return None;
     }
     let trimmed = sql.trim_end().trim_end_matches(';');
@@ -55,6 +95,16 @@ mod tests {
     #[test]
     fn respects_explicit_limit() {
         assert_eq!(paginate("SELECT * FROM widgets LIMIT 10", 0, 500), None);
+    }
+
+    #[test]
+    fn subquery_limit_does_not_count_as_top_level() {
+        // The inner LIMIT only bounds the subquery; the outer, unbounded
+        // SELECT still needs auto-pagination.
+        assert_eq!(
+            paginate("SELECT * FROM (SELECT id FROM widgets LIMIT 10) t", 0, 500),
+            Some("SELECT * FROM (SELECT id FROM widgets LIMIT 10) t LIMIT 500 OFFSET 0".to_string())
+        );
     }
 
     #[test]
