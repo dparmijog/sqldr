@@ -4,8 +4,8 @@
 //!
 //! OSC 52 writes to the terminal's clipboard through the escape sequence
 //! itself rather than a platform clipboard API, so it works identically
-//! over SSH — matching this project's "personal use from the terminal"
-//! focus (see `START_HERE.md`). Most terminal emulators support it; some
+//! over SSH — matching this project's personal-use-from-the-terminal
+//! focus. Most terminal emulators support it; some
 //! require an explicit opt-in setting for security reasons.
 
 use std::io::Write;
