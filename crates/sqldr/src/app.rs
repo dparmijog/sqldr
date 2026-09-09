@@ -321,6 +321,10 @@ pub struct App {
     /// connection tree instead.
     pub active_tab: Option<usize>,
     pub editor: TextArea<'static>,
+    /// Pre-pagination form of the last query synced into the editor —
+    /// deleting our auto-appended `LIMIT`/`OFFSET` back to exactly this
+    /// text and rerunning is treated as "run unbounded, on purpose".
+    last_synced_base_sql: Option<String>,
     pub results: ResultsState,
     pub status: StatusMessage,
     pub quit: bool,
@@ -353,6 +357,7 @@ impl App {
             tabs: Vec::new(),
             active_tab: None,
             editor,
+            last_synced_base_sql: None,
             results: ResultsState::default(),
             status: StatusMessage::Idle,
             quit: false,
@@ -576,7 +581,7 @@ impl App {
             Some(Overlay::Confirm { sql, source_table, record_history, .. }) => {
                 match key.code {
                     KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        self.run_query(sql, source_table, record_history, 0, sqldr_core::DEFAULT_PAGE_SIZE);
+                        self.run_query(sql, source_table, record_history, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
                     }
                     _ => {
                         self.status = StatusMessage::Info("cancelado".into());
@@ -1013,7 +1018,7 @@ impl App {
         self.focus = Focus::Results;
         // The default page (LIMIT 500) is a convenience, not a deliberate
         // query the user wants to recall later, so it doesn't get recorded.
-        self.run_query(sql, source_table, false, 0, sqldr_core::DEFAULT_PAGE_SIZE);
+        self.run_query(sql, source_table, false, Some((0, sqldr_core::DEFAULT_PAGE_SIZE)));
     }
 
     /// Every loaded table across every connection, flattened and ignoring
@@ -1129,12 +1134,18 @@ impl App {
         if sql.trim().is_empty() {
             return;
         }
-        self.maybe_confirm_and_run(sql, None, true);
+        // If the editor still reads exactly like the last query's
+        // un-paginated base (i.e. the user deleted the `LIMIT`/`OFFSET` we
+        // appended and re-ran), honor that as "run unbounded" instead of
+        // silently reinstating the auto-limit they just removed.
+        let unbounded = self.last_synced_base_sql.as_deref() == Some(sql.as_str());
+        self.maybe_confirm_and_run(sql, None, true, unbounded);
     }
 
     /// Runs `sql` immediately, unless it's an `UPDATE`/`DELETE` without a
     /// `WHERE` clause — then it's staged behind a confirmation overlay.
-    fn maybe_confirm_and_run(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool) {
+    /// `unbounded` skips auto-pagination entirely, running `sql` as typed.
+    fn maybe_confirm_and_run(&mut self, sql: String, source_table: Option<(String, String)>, record_history: bool, unbounded: bool) {
         if needs_where_confirmation(&sql) {
             self.overlay = Some(Overlay::Confirm {
                 message: format!("Sin WHERE — ¿ejecutar de todas formas?\n\n{sql}"),
@@ -1144,7 +1155,8 @@ impl App {
             });
             return;
         }
-        self.run_query(sql, source_table, record_history, 0, sqldr_core::DEFAULT_PAGE_SIZE);
+        let pagination_request = if unbounded { None } else { Some((0, sqldr_core::DEFAULT_PAGE_SIZE)) };
+        self.run_query(sql, source_table, record_history, pagination_request);
     }
 
     /// Re-runs a paginated result set's base query at a different page.
@@ -1163,7 +1175,7 @@ impl App {
         };
         let source_table = self.results.source_table.clone();
         // Not a fresh query the user typed — don't record it again.
-        self.run_query(pagination.base_sql, source_table, false, new_page, pagination.page_size);
+        self.run_query(pagination.base_sql, source_table, false, Some((new_page, pagination.page_size)));
     }
 
     /// Replaces the editor's content, placing the cursor at the end so
@@ -1176,13 +1188,16 @@ impl App {
         self.editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
     }
 
+    /// `pagination_request` is `Some((page, page_size))` to auto-paginate
+    /// (skipped if `sql` already has its own top-level `LIMIT`), or `None`
+    /// to run `sql` completely unmodified — e.g. the user explicitly
+    /// stripped a previously auto-applied `LIMIT` and wants it gone.
     fn run_query(
         &mut self,
         sql: String,
         source_table: Option<(String, String)>,
         record_history: bool,
-        page: usize,
-        page_size: u64,
+        pagination_request: Option<(usize, u64)>,
     ) {
         let Some(ci) = self.active_conn else {
             self.status = StatusMessage::Error("sin conexión activa: elige una en el sidebar".into());
@@ -1210,13 +1225,18 @@ impl App {
             let _ = self.history_for(&name).push(&sql);
         }
 
-        let (exec_sql, pagination) = match sqldr_core::paginate(&sql, page, page_size) {
-            Some(paged) => (paged, Some(PageState { base_sql: sql, page, page_size })),
-            None => (sql, None),
+        let (exec_sql, pagination) = match pagination_request {
+            Some((page, page_size)) => match sqldr_core::paginate(&sql, page, page_size) {
+                Some(paged) => (paged, Some(PageState { base_sql: sql.clone(), page, page_size })),
+                None => (sql.clone(), None),
+            },
+            None => (sql.clone(), None),
         };
         // Show exactly what's about to run — including any auto-applied
-        // LIMIT/OFFSET — so the user can see it and freely edit/rerun
-        // (e.g. drop the LIMIT) without hunting for it.
+        // LIMIT/OFFSET — so the user can see it and freely edit/rerun (and
+        // remember the pre-pagination form, so deleting the LIMIT back to
+        // it and rerunning is recognized as "run unbounded").
+        self.last_synced_base_sql = Some(sql);
         self.set_editor_sql(&exec_sql);
 
         let cancel = CancellationToken::new();
