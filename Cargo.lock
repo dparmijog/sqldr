@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "sqldr"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "sqldr-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",

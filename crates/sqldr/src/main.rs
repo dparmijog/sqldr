@@ -11,7 +11,7 @@ use sqldr_core::{is_mutating, ConnConfig, Driver, MySqlDriver, Row};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
-#[command(name = "sqldr", about = "TUI + CLI para administrar bases de datos")]
+#[command(name = "sqldr", version, about = "TUI + CLI para administrar bases de datos")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
