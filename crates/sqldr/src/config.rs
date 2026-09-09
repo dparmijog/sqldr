@@ -19,6 +19,10 @@ pub struct ConnEntry {
 pub struct Config {
     #[serde(rename = "connections", default)]
     pub connections: Vec<ConnEntry>,
+    /// Selected [`crate::theme::Theme`] name (`Ctrl+O` options dialog).
+    /// `None`/unrecognized falls back to the default theme.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 pub fn config_path() -> Result<PathBuf> {

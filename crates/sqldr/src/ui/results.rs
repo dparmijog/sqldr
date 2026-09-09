@@ -2,7 +2,7 @@
 //! a cell cursor for `y`/`Y`/`c`/`i` copy actions.
 
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Cell, Row as UiRow, Table};
 use ratatui::Frame;
 
@@ -23,7 +23,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(if focused { Style::default().fg(Color::Cyan) } else { Style::default() });
+        .border_style(Style::default().fg(if focused { app.theme.accent } else { app.theme.muted }));
 
     if app.results.cols.is_empty() {
         frame.render_widget(block, area);
@@ -42,7 +42,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let header = UiRow::new(app.results.cols.clone()).style(Style::default().add_modifier(Modifier::BOLD));
+    let header = UiRow::new(app.results.cols.clone())
+        .style(Style::default().fg(app.theme.muted).add_modifier(Modifier::BOLD));
 
     let start = app.results.scroll_top.min(app.results.rows.len());
     let end = (start + visible_height.max(1)).min(app.results.rows.len());
@@ -54,7 +55,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         UiRow::new(row.values.iter().enumerate().map(|(col_idx, v)| {
             let text = v.to_string();
             if focused && absolute == cursor_row && col_idx == cursor_col {
-                Cell::from(text).style(Style::default().add_modifier(Modifier::REVERSED))
+                Cell::from(text).style(Style::default().fg(app.theme.accent).add_modifier(Modifier::REVERSED))
             } else {
                 Cell::from(text)
             }

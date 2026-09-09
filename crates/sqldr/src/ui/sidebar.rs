@@ -3,7 +3,7 @@
 //! a flat table search (`/`).
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
@@ -48,10 +48,10 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(if focused { Style::default().fg(Color::Cyan) } else { Style::default() });
+        .border_style(Style::default().fg(if focused { app.theme.accent } else { app.theme.muted }));
 
     let list = List::new(items).block(block).highlight_style(
-        Style::default().add_modifier(Modifier::REVERSED),
+        Style::default().fg(app.theme.accent).add_modifier(Modifier::REVERSED),
     );
 
     let mut state = ListState::default();

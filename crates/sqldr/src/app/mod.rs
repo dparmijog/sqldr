@@ -1,0 +1,633 @@
+//! Global TUI state and the event loop that drives it.
+//!
+//! Implementation is split by concern across sibling modules — `mouse`,
+//! `query`, `results`, `settings`, `sidebar`, `wizard` — each holding an
+//! `impl App` block for its slice of behavior. This file owns the shared
+//! types, the `App` struct itself, and the top-level key/event dispatch
+//! that routes into those modules.
+
+mod mouse;
+mod query;
+mod results;
+mod settings;
+mod sidebar;
+mod wizard;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use sqldr_core::{History, MySqlDriver, Row, Schema};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tui_textarea::TextArea;
+
+use crate::config::{ConnEntry, Config};
+use crate::theme::Theme;
+
+/// Which pane currently receives key input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Sidebar,
+    Editor,
+    Results,
+}
+
+impl Focus {
+    pub fn next(self) -> Focus {
+        match self {
+            Focus::Sidebar => Focus::Editor,
+            Focus::Editor => Focus::Results,
+            Focus::Results => Focus::Sidebar,
+        }
+    }
+
+    pub fn prev(self) -> Focus {
+        match self {
+            Focus::Sidebar => Focus::Results,
+            Focus::Editor => Focus::Sidebar,
+            Focus::Results => Focus::Editor,
+        }
+    }
+}
+
+/// Connection lifecycle as tracked by the sidebar.
+pub enum ConnStatus {
+    Idle,
+    Connecting,
+    Connected(Arc<MySqlDriver>),
+    Error(String),
+}
+
+/// One connection entry plus everything the sidebar needs to render its
+/// subtree (schema, expand/collapse state).
+pub struct ConnState {
+    pub entry: ConnEntry,
+    pub status: ConnStatus,
+    pub expanded: bool,
+    pub schema: Option<Schema>,
+}
+
+impl ConnState {
+    fn new(entry: ConnEntry) -> Self {
+        ConnState { entry, status: ConnStatus::Idle, expanded: false, schema: None }
+    }
+}
+
+/// A flattened, renderable row of the sidebar's top-level tree
+/// (connections and their databases only — tables live inside a
+/// [`DbTab`], opened by selecting a database).
+pub enum SidebarNode {
+    Connection(usize),
+    Database(usize, usize),
+}
+
+/// An open "use this database" tab: selecting a database in the
+/// connection tree opens (or switches to) one of these, and the sidebar
+/// then shows that database's tables instead of the tree.
+pub struct DbTab {
+    pub conn_idx: usize,
+    pub db_idx: usize,
+}
+
+/// Result of the most recent query run, shown in the results pane.
+pub struct ResultsState {
+    pub rows: Vec<Row>,
+    pub cols: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    /// Top row currently visible; kept in sync with `cursor_row` by the
+    /// results renderer so the selection never scrolls off-screen.
+    pub scroll_top: usize,
+    pub running: bool,
+    /// `(database, table)` this result set was previewed from, if any.
+    /// Enables "copy row as INSERT" (needs a concrete target table).
+    pub source_table: Option<(String, String)>,
+    /// Present when this result set can be paged further/back — absent
+    /// when the query wasn't a plain read or already had its own `LIMIT`.
+    pub pagination: Option<PageState>,
+}
+
+/// Tracks the un-paginated SQL and current page for a paginated result set,
+/// so `PageUp`/`PageDown` can rebuild the query for the next/previous page.
+#[derive(Clone)]
+pub struct PageState {
+    pub base_sql: String,
+    pub page: usize,
+    pub page_size: u64,
+}
+
+impl Default for ResultsState {
+    fn default() -> Self {
+        ResultsState {
+            rows: Vec::new(),
+            cols: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll_top: 0,
+            running: false,
+            source_table: None,
+            pagination: None,
+        }
+    }
+}
+
+/// Status-bar line: active connection, running/error state, read-only flag.
+pub enum StatusMessage {
+    Idle,
+    Running,
+    Error(String),
+    Info(String),
+}
+
+/// A pending SQL statement queued in the history picker, ready to load into
+/// the editor.
+pub struct HistoryPicker {
+    /// All entries for the active connection, most recent last (as stored).
+    pub items: Vec<String>,
+    pub filter: String,
+    pub selected: usize,
+}
+
+impl HistoryPicker {
+    /// Entries matching the current filter, most-recent-first.
+    pub fn filtered(&self) -> Vec<&str> {
+        let needle = self.filter.to_ascii_lowercase();
+        self.items
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .filter(|sql| needle.is_empty() || sql.to_ascii_lowercase().contains(&needle))
+            .collect()
+    }
+}
+
+/// Database engine offered by the "add connection" wizard. Only MySQL is
+/// implemented today; the roadmap adds Postgres and SQLite as more
+/// `Driver` impls land, at which point they join `Engine::ALL`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    MySql,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 1] = [Engine::MySql];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::MySql => "MySQL",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::MySql => 3306,
+        }
+    }
+}
+
+/// Which field of the connection-details form currently has input focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConnField {
+    Name,
+    Host,
+    Port,
+    User,
+    Password,
+    ReadOnly,
+}
+
+impl ConnField {
+    const ORDER: [ConnField; 6] = [
+        ConnField::Name,
+        ConnField::Host,
+        ConnField::Port,
+        ConnField::User,
+        ConnField::Password,
+        ConnField::ReadOnly,
+    ];
+
+    fn next(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+/// Where the "add connection" wizard currently is. Mirrors the flow the
+/// user asked for: pick an engine, fill in host/credentials, test them
+/// live against the server, then pick a database from what's actually
+/// there — rather than typing a database name blind.
+#[derive(Clone)]
+pub enum WizardStep {
+    SelectEngine { selected: usize },
+    Details,
+    Testing,
+    SelectDatabase { databases: Vec<String>, selected: usize },
+}
+
+/// Form state for the "nueva conexión" modal (`Ctrl+N`).
+pub struct ConnWizard {
+    pub step: WizardStep,
+    pub engine: Engine,
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub read_only: bool,
+    pub field: ConnField,
+    pub error: Option<String>,
+    /// Identifies which background connection test this wizard is waiting
+    /// on, so a stale result (e.g. after the user cancelled and reopened
+    /// the wizard) is silently dropped instead of clobbering fresh state.
+    request_id: u64,
+}
+
+impl ConnWizard {
+    fn new() -> Self {
+        let engine = Engine::ALL[0];
+        ConnWizard {
+            step: WizardStep::SelectEngine { selected: 0 },
+            engine,
+            name: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: engine.default_port().to_string(),
+            user: String::new(),
+            password: String::new(),
+            read_only: false,
+            field: ConnField::Name,
+            error: None,
+            request_id: 0,
+        }
+    }
+
+    fn field_mut(&mut self, field: ConnField) -> Option<&mut String> {
+        match field {
+            ConnField::Name => Some(&mut self.name),
+            ConnField::Host => Some(&mut self.host),
+            ConnField::Port => Some(&mut self.port),
+            ConnField::User => Some(&mut self.user),
+            ConnField::Password => Some(&mut self.password),
+            ConnField::ReadOnly => None,
+        }
+    }
+}
+
+/// A modal that intercepts all key input until resolved.
+pub enum Overlay {
+    History(HistoryPicker),
+    /// Confirmation for a `DML` statement without `WHERE`. Carries what to
+    /// do if the user accepts.
+    Confirm {
+        sql: String,
+        message: String,
+        source_table: Option<(String, String)>,
+        record_history: bool,
+    },
+    AddConnection(ConnWizard),
+    /// Options dialog (`Ctrl+O`): arrowing through `Theme::ALL` previews
+    /// each theme live (`App::theme` is mutated immediately); `original`
+    /// is restored on cancel, `Enter` persists the current preview.
+    Settings { selected: usize, original: Theme },
+}
+
+/// Events fed into the main select loop, whatever their origin (terminal,
+/// a running query, or a background schema load).
+pub enum AppEvent {
+    Key(KeyEvent),
+    Mouse(MouseEvent),
+    Resize,
+    QueryRow(Row),
+    QueryDone,
+    QueryError(String),
+    SchemaLoaded(usize, Box<Schema>),
+    SchemaError(usize, String),
+    Connected(usize, Arc<MySqlDriver>),
+    ConnectError(usize, String),
+    /// Result of testing credentials in the "add connection" wizard: the
+    /// request id (see [`ConnWizard::request_id`]) and either the server's
+    /// database list or an error message.
+    WizardTested(u64, Result<Vec<String>, String>),
+}
+
+pub struct App {
+    pub conns: Vec<ConnState>,
+    pub active_conn: Option<usize>,
+    pub focus: Focus,
+    pub sidebar_cursor: usize,
+    /// Top row currently visible in the sidebar; kept in sync with
+    /// `sidebar_cursor` by the sidebar renderer so scrolling only moves the
+    /// minimum amount needed, instead of jumping the whole viewport.
+    pub sidebar_scroll_top: usize,
+    /// Active table search text (`/` in the sidebar). `None` = normal tree
+    /// navigation; `Some(text)` = flat search across every loaded table.
+    pub sidebar_filter: Option<String>,
+    /// Open "use this database" tabs.
+    pub tabs: Vec<DbTab>,
+    /// Index into `tabs` currently shown in the sidebar; `None` shows the
+    /// connection tree instead.
+    pub active_tab: Option<usize>,
+    pub editor: TextArea<'static>,
+    /// Pre-pagination form of the last query synced into the editor —
+    /// deleting our auto-appended `LIMIT`/`OFFSET` back to exactly this
+    /// text and rerunning is treated as "run unbounded, on purpose".
+    last_synced_base_sql: Option<String>,
+    pub results: ResultsState,
+    pub status: StatusMessage,
+    pub quit: bool,
+    pub cancel: Option<CancellationToken>,
+    pub overlay: Option<Overlay>,
+    /// Active color palette; changed live from the options dialog
+    /// (`Ctrl+O`) and persisted to `config.toml` on confirm.
+    pub theme: Theme,
+    /// Sidebar width as a percentage of total width; mouse-drag resizable.
+    pub sidebar_width_pct: u16,
+    /// Editor pane height in rows; mouse-drag resizable.
+    pub editor_height: u16,
+    /// Area the UI was last rendered into, used to hit-test mouse events
+    /// against the same layout the user is looking at.
+    pub last_area: ratatui::layout::Rect,
+    drag: Option<mouse::Drag>,
+    /// Lazily loaded per-connection query history, keyed by connection name.
+    history: HashMap<String, History>,
+    pub events: mpsc::UnboundedSender<AppEvent>,
+}
+
+impl App {
+    pub fn new(config: Config, events: mpsc::UnboundedSender<AppEvent>) -> Self {
+        let mut editor = TextArea::default();
+        editor.set_placeholder_text("-- escribe SQL, Ctrl+Enter para ejecutar");
+        let theme = Theme::by_name(config.theme.as_deref().unwrap_or(""));
+        App {
+            conns: config.connections.into_iter().map(ConnState::new).collect(),
+            active_conn: None,
+            focus: Focus::Sidebar,
+            sidebar_cursor: 0,
+            sidebar_scroll_top: 0,
+            sidebar_filter: None,
+            tabs: Vec::new(),
+            active_tab: None,
+            editor,
+            last_synced_base_sql: None,
+            results: ResultsState::default(),
+            status: StatusMessage::Idle,
+            quit: false,
+            cancel: None,
+            overlay: None,
+            theme,
+            sidebar_width_pct: 25,
+            editor_height: 7,
+            last_area: ratatui::layout::Rect::default(),
+            drag: None,
+            history: HashMap::new(),
+            events,
+        }
+    }
+
+    /// Snapshots the current connections and theme into a saveable
+    /// [`Config`] — used by both the "add connection" wizard and the
+    /// options dialog so persisting one setting never drops the other.
+    fn to_config(&self) -> Config {
+        Config {
+            connections: self.conns.iter().map(|c| c.entry.clone()).collect(),
+            theme: Some(self.theme.name.to_string()),
+        }
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) {
+        if self.overlay.is_some() {
+            self.on_overlay_key(key);
+            return;
+        }
+
+        // Global keys work regardless of focus.
+        match (key.code, key.modifiers) {
+            (KeyCode::Tab, _) => {
+                self.focus = self.focus.next();
+                return;
+            }
+            (KeyCode::BackTab, _) => {
+                self.focus = self.focus.prev();
+                return;
+            }
+            (KeyCode::Enter, KeyModifiers::CONTROL) | (KeyCode::F(5), _) => {
+                self.run_editor_query();
+                return;
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                self.cancel_running_query();
+                return;
+            }
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                self.open_history_picker();
+                return;
+            }
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                self.overlay = Some(Overlay::AddConnection(ConnWizard::new()));
+                return;
+            }
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+                let selected = Theme::ALL.iter().position(|t| *t == self.theme).unwrap_or(0);
+                self.overlay = Some(Overlay::Settings { selected, original: self.theme });
+                return;
+            }
+            // Ctrl+E is handled by the terminal event loop (it needs to
+            // suspend/resume the terminal to shell out to `$EDITOR`).
+            (KeyCode::Char('q'), KeyModifiers::NONE) if self.focus != Focus::Editor => {
+                self.quit = true;
+                return;
+            }
+            _ => {}
+        }
+
+        match self.focus {
+            Focus::Sidebar => self.on_sidebar_key(key),
+            Focus::Editor => {
+                self.editor.input(key);
+            }
+            Focus::Results => self.on_results_key(key),
+        }
+    }
+
+    fn on_overlay_key(&mut self, key: KeyEvent) {
+        match self.overlay.take() {
+            Some(Overlay::History(picker)) => self.on_history_key(picker, key),
+            Some(Overlay::Confirm { sql, source_table, record_history, .. }) => {
+                self.on_confirm_key(sql, source_table, record_history, key)
+            }
+            Some(Overlay::AddConnection(wizard)) => self.on_wizard_key(wizard, key),
+            Some(Overlay::Settings { selected, original }) => self.on_settings_key(selected, original, key),
+            None => {}
+        }
+    }
+
+    pub fn on_app_event(&mut self, event: AppEvent) {
+        match event {
+            AppEvent::Key(key) => self.on_key(key),
+            AppEvent::Mouse(mouse) => self.on_mouse(mouse),
+            AppEvent::Resize => {}
+            AppEvent::QueryRow(row) => {
+                if self.results.cols.is_empty() {
+                    self.results.cols = row.cols.clone();
+                }
+                self.results.rows.push(row);
+            }
+            AppEvent::QueryDone => {
+                self.results.running = false;
+                self.cancel = None;
+                self.status = StatusMessage::Idle;
+            }
+            AppEvent::QueryError(e) => {
+                self.results.running = false;
+                self.cancel = None;
+                self.status = StatusMessage::Error(e);
+            }
+            AppEvent::Connected(ci, driver) => {
+                self.conns[ci].status = ConnStatus::Connected(driver);
+            }
+            AppEvent::SchemaLoaded(ci, schema) => {
+                self.conns[ci].schema = Some(*schema);
+            }
+            AppEvent::SchemaError(ci, e) => {
+                self.conns[ci].status = ConnStatus::Error(e.clone());
+                self.status = StatusMessage::Error(format!("schema '{}': {e}", self.conns[ci].entry.name));
+            }
+            AppEvent::ConnectError(ci, e) => {
+                self.conns[ci].status = ConnStatus::Error(e.clone());
+                self.status = StatusMessage::Error(format!("conectando '{}': {e}", self.conns[ci].entry.name));
+            }
+            AppEvent::WizardTested(id, result) => {
+                let is_current = matches!(
+                    &self.overlay,
+                    Some(Overlay::AddConnection(wizard)) if wizard.request_id == id
+                );
+                if !is_current {
+                    // Stale result (wizard cancelled/reopened) or a
+                    // different overlay is open now — leave it alone.
+                    return;
+                }
+                let Some(Overlay::AddConnection(mut wizard)) = self.overlay.take() else {
+                    return;
+                };
+                match result {
+                    Ok(databases) => {
+                        wizard.step = WizardStep::SelectDatabase { databases, selected: 0 };
+                    }
+                    Err(e) => {
+                        wizard.step = WizardStep::Details;
+                        wizard.error = Some(format!("no se pudo conectar: {e}"));
+                    }
+                }
+                self.overlay = Some(Overlay::AddConnection(wizard));
+            }
+        }
+    }
+}
+
+fn point_in(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> App {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        App::new(Config::default(), tx)
+    }
+
+    #[test]
+    fn stale_wizard_test_result_does_not_clobber_a_different_overlay() {
+        let mut app = test_app();
+        app.overlay = Some(Overlay::History(HistoryPicker {
+            items: vec!["SELECT 1".to_string()],
+            filter: String::new(),
+            selected: 0,
+        }));
+
+        // A WizardTested event arrives (e.g. a stale background connection
+        // test) while a completely different overlay is open.
+        app.on_app_event(AppEvent::WizardTested(999, Ok(vec!["some_db".to_string()])));
+
+        assert!(
+            matches!(app.overlay, Some(Overlay::History(_))),
+            "an unrelated overlay must survive a WizardTested event for a different request"
+        );
+    }
+
+    #[test]
+    fn wizard_test_result_updates_matching_wizard() {
+        let mut app = test_app();
+        let mut wizard = ConnWizard::new();
+        wizard.step = WizardStep::Testing;
+        wizard.request_id = 42;
+        app.overlay = Some(Overlay::AddConnection(wizard));
+
+        app.on_app_event(AppEvent::WizardTested(42, Ok(vec!["some_db".to_string()])));
+
+        match &app.overlay {
+            Some(Overlay::AddConnection(w)) => match &w.step {
+                WizardStep::SelectDatabase { databases, .. } => {
+                    assert_eq!(databases, &vec!["some_db".to_string()]);
+                }
+                _ => panic!("expected SelectDatabase step after a successful test"),
+            },
+            _ => panic!("expected AddConnection overlay to remain"),
+        }
+    }
+
+    #[test]
+    fn stale_wizard_test_result_is_ignored_for_a_newer_wizard() {
+        let mut app = test_app();
+        let mut wizard = ConnWizard::new();
+        wizard.step = WizardStep::Testing;
+        wizard.request_id = 2; // newer than the stale result below
+        app.overlay = Some(Overlay::AddConnection(wizard));
+
+        app.on_app_event(AppEvent::WizardTested(1, Ok(vec!["some_db".to_string()])));
+
+        match &app.overlay {
+            Some(Overlay::AddConnection(w)) => {
+                assert!(matches!(w.step, WizardStep::Testing), "stale result must not advance a newer wizard");
+            }
+            _ => panic!("expected AddConnection overlay to remain"),
+        }
+    }
+
+    #[test]
+    fn options_dialog_previews_theme_live_and_persists_on_confirm() {
+        let mut app = test_app();
+        let original = app.theme;
+        app.overlay = Some(Overlay::Settings { selected: 0, original });
+
+        // Arrow to the next theme: should apply immediately (live preview).
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_ne!(app.theme, original, "arrowing in the options dialog must preview the theme live");
+        assert!(app.overlay.is_some(), "dialog stays open while browsing");
+
+        let previewed = app.theme;
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.theme, previewed, "Enter keeps the previewed theme");
+        assert!(app.overlay.is_none(), "Enter closes the dialog");
+    }
+
+    #[test]
+    fn options_dialog_reverts_theme_on_escape() {
+        let mut app = test_app();
+        let original = app.theme;
+        app.overlay = Some(Overlay::Settings { selected: 0, original });
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_ne!(app.theme, original);
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.theme, original, "Esc must restore the theme active before opening the dialog");
+        assert!(app.overlay.is_none());
+    }
+}

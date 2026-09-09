@@ -1,7 +1,7 @@
 //! Bottom status line: active connection, read-only flag, last message.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
@@ -20,9 +20,9 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
                 ConnStatus::Error(_) => "error",
             };
             let style = if conn.entry.read_only {
-                Style::default().bg(Color::Red).fg(Color::White)
+                Style::default().bg(app.theme.error).fg(ratatui::style::Color::White)
             } else {
-                Style::default().fg(Color::Green)
+                Style::default().fg(app.theme.success)
             };
             spans.push(Span::styled(format!(" {} [{state}] ", conn.entry.name), style));
         }
@@ -39,13 +39,13 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     spans.push(Span::raw(" | "));
     match &app.status {
         StatusMessage::Idle => spans.push(Span::raw("listo")),
-        StatusMessage::Running => spans.push(Span::styled("ejecutando…", Style::default().fg(Color::Yellow))),
-        StatusMessage::Error(e) => spans.push(Span::styled(format!("error: {e}"), Style::default().fg(Color::Red))),
+        StatusMessage::Running => spans.push(Span::styled("ejecutando…", Style::default().fg(app.theme.warning))),
+        StatusMessage::Error(e) => spans.push(Span::styled(format!("error: {e}"), Style::default().fg(app.theme.error))),
         StatusMessage::Info(m) => spans.push(Span::raw(m.clone())),
     }
 
     spans.push(Span::raw(
-        " | Tab: foco  Ctrl+Enter/F5: ejecutar  Ctrl+C: cancelar  Ctrl+R: historial  Ctrl+N: nueva conexión  Ctrl+E: $EDITOR  q: salir",
+        " | Tab: foco  Ctrl+Enter/F5: ejecutar  Ctrl+C: cancelar  Ctrl+R: historial  Ctrl+N: nueva conexión  Ctrl+O: opciones  Ctrl+E: $EDITOR  q: salir",
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
