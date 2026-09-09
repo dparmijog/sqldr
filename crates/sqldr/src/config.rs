@@ -25,7 +25,13 @@ pub struct Config {
     pub theme: Option<String>,
 }
 
+/// Overridable via `SQLDR_CONFIG_DIR` (tests only — production never sets
+/// it) so `cargo test` can never read or clobber the real
+/// `~/.config/sqldr/config.toml` on the machine running the suite.
 pub fn config_path() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("SQLDR_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join("config.toml"));
+    }
     let dirs = directories::ProjectDirs::from("", "", "sqldr")
         .context("could not determine config directory")?;
     Ok(dirs.config_dir().join("config.toml"))

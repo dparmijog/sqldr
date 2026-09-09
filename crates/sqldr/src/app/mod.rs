@@ -600,8 +600,24 @@ mod tests {
         }
     }
 
+    /// Guards `SQLDR_CONFIG_DIR` (a process-wide env var) so this is the
+    /// only test allowed to touch it, and never races another thread.
+    static CONFIG_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn options_dialog_previews_theme_live_and_persists_on_confirm() {
+        let _guard = CONFIG_ENV_LOCK.lock();
+        // `config::save`/`load` resolve through `SQLDR_CONFIG_DIR` when
+        // set, specifically so this real disk-persistence assertion can
+        // never read or clobber the developer's actual config.toml.
+        let dir = std::env::temp_dir().join(format!(
+            "sqldr-test-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("SQLDR_CONFIG_DIR", &dir);
+
         let mut app = test_app();
         let original = app.theme;
         app.overlay = Some(Overlay::Settings { selected: 0, original });
@@ -615,6 +631,16 @@ mod tests {
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.theme, previewed, "Enter keeps the previewed theme");
         assert!(app.overlay.is_none(), "Enter closes the dialog");
+
+        let saved = crate::config::load().expect("saved config must be readable");
+        assert_eq!(
+            saved.theme.as_deref(),
+            Some(previewed.name),
+            "Enter must persist the previewed theme to disk"
+        );
+
+        std::env::remove_var("SQLDR_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -629,5 +655,30 @@ mod tests {
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert_eq!(app.theme, original, "Esc must restore the theme active before opening the dialog");
         assert!(app.overlay.is_none());
+    }
+
+    /// Guards against silently reintroducing a hardcoded border color:
+    /// renders a real frame and checks the focused sidebar border pixel
+    /// actually carries the active theme's `accent`, not some fixed
+    /// `Color::Cyan`. Uses `TestBackend`, which stores `Style`s directly
+    /// in its buffer — no ANSI is written, so this is unaffected by
+    /// terminal capability or `NO_COLOR`.
+    #[test]
+    fn focused_border_color_tracks_the_active_theme() {
+        let mut app = test_app();
+        assert_eq!(app.focus, Focus::Sidebar);
+        for &theme in Theme::ALL {
+            app.theme = theme;
+            let backend = ratatui::backend::TestBackend::new(80, 24);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let corner = &terminal.backend().buffer()[(0, 0)];
+            assert_eq!(
+                corner.style().fg,
+                Some(theme.accent),
+                "focused sidebar border must use theme '{}' accent color",
+                theme.name
+            );
+        }
     }
 }

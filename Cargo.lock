@@ -2100,6 +2100,7 @@ dependencies = [
  "directories",
  "futures",
  "keyring",
+ "parking_lot",
  "ratatui",
  "rpassword",
  "serde",
