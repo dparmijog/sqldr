@@ -105,7 +105,7 @@ With no subcommand, launches the interactive interface.
 | `Ctrl+R` | query history for the active connection |
 | `Ctrl+E` | edit the query in `$EDITOR` |
 | `Ctrl+N` | wizard to add a new connection |
-| `Ctrl+X` | run the editor's query through `EXPLAIN` instead of executing it |
+| `Ctrl+X` / `F6` | run the editor's query through `EXPLAIN` instead of executing it (`F6` if your terminal/multiplexer doesn't forward `Ctrl+<letter>` combos reliably) |
 | `PageUp`/`PageDown` in results | page through results (every `SELECT` without its own `LIMIT` gets an automatic 500-row one) |
 | `g` in results | follow a foreign-key cell to the referenced row (needs a table preview, not an arbitrary query) |
 | `y` / `Y` / `c` / `i` in results | copy cell / row as JSON / CSV / `INSERT` (via OSC 52, works over SSH) |

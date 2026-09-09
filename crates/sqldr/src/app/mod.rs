@@ -534,7 +534,7 @@ impl App {
                 self.overlay = Some(Overlay::AddConnection(ConnWizard::new()));
                 return;
             }
-            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+            (KeyCode::Char('x'), KeyModifiers::CONTROL) | (KeyCode::F(6), _) => {
                 self.run_editor_explain();
                 return;
             }
