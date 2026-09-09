@@ -1,30 +1,30 @@
 # sqldr
 
-TUI para administrar bases de datos (MySQL hoy; Postgres y SQLite planeados)
-al estilo [herdr](https://github.com/herdrdev/herdr): un binario, sidebar con
-estado de conexiones, editor + resultados, pensado para uso diario desde la
-terminal.
+A database administration TUI (MySQL today; Postgres and SQLite planned)
+in the style of [herdr](https://github.com/herdrdev/herdr): a single
+binary, a sidebar with connection status, an editor + results pane, built
+for daily use from the terminal.
 
-`sqldr-core` no sabe nada de terminal ni UI — solo expone el trait `Driver`
-y los tipos que cualquier motor implementa. La TUI (`sqldr`) habla
-exclusivamente con ese trait, nunca con MySQL directamente.
+`sqldr-core` knows nothing about terminals or UI — it only exposes the
+`Driver` trait and the types any engine implements. The TUI (`sqldr`)
+speaks exclusively to that trait, never to MySQL directly.
 
-## Estado actual
+## Current status
 
-- **Motor soportado:** MySQL (vía [`sqlx`](https://github.com/launchbadge/sqlx)).
+- **Supported engine:** MySQL (via [`sqlx`](https://github.com/launchbadge/sqlx)).
 - **CLI:** `sqldr query`, `sqldr conn set-password`.
-- **TUI:** sidebar (conexiones → bases de datos → tabs de tabla), editor SQL,
-  resultados paginados, historial, guardarraíles, mouse, wizard de alta de
-  conexiones.
+- **TUI:** sidebar (connections → databases → per-table tabs), SQL editor,
+  paginated results, history, guardrails, mouse support, connection
+  creation wizard.
 
-## Requisitos
+## Requirements
 
-- Rust estable (`rustup update stable` o el toolchain de tu distro), edición 2021.
-- Un servidor MySQL accesible (local o remoto) para conectar.
-- Backend de keyring del sistema (D-Bus secret-service en Linux, Keychain en
-  macOS, Credential Manager en Windows) para guardar contraseñas.
+- Stable Rust (`rustup update stable` or your distro's toolchain), edition 2021.
+- A reachable MySQL server (local or remote) to connect to.
+- A system keyring backend (D-Bus secret-service on Linux, Keychain on
+  macOS, Credential Manager on Windows) to store passwords.
 
-## Compilar
+## Building
 
 ```bash
 git clone git@github.com:dparmijog/sqldr.git
@@ -32,16 +32,17 @@ cd sqldr
 cargo build --workspace --release
 ```
 
-El binario queda en `target/release/sqldr` (o `target/debug/sqldr` con
-`cargo build` sin `--release`).
+The binary ends up at `target/release/sqldr` (or `target/debug/sqldr` with
+a plain `cargo build`).
 
 ```bash
-cargo test --workspace   # corre los tests unitarios (guard, pagination, clipboard, app)
+cargo test --workspace   # runs unit tests (guard, pagination, clipboard, app)
 ```
 
-## Configuración
+## Configuration
 
-`sqldr` lee `~/.config/sqldr/config.toml` (según XDG/directories del SO):
+`sqldr` reads `~/.config/sqldr/config.toml` (per your OS's XDG/directories
+convention):
 
 ```toml
 [[connections]]
@@ -52,22 +53,22 @@ read_only = false
 [[connections]]
 name = "kennis-prod"
 url = "mysql://user@prod-host:3306/kennis"
-read_only = true          # bloquea DML/DDL, barra roja en la UI
+read_only = true          # blocks DML/DDL, red bar in the UI
 ```
 
-Las contraseñas **no** se guardan en el archivo — van al keyring del
-sistema, asociadas al nombre de la conexión:
+Passwords are **not** stored in the file — they go to the system keyring,
+keyed by connection name:
 
 ```bash
 sqldr conn set-password kennis-dev
 ```
 
-También podés crear conexiones sin tocar el archivo: dentro de la TUI,
-`Ctrl+N` abre un wizard que elige el motor, prueba las credenciales contra
-el servidor real, y te deja elegir la base de datos de una lista antes de
-guardar.
+You can also create connections without touching the file: inside the
+TUI, `Ctrl+N` opens a wizard that picks the engine, tests credentials
+against the real server, and lets you choose the database from a live
+list before saving.
 
-## Uso
+## Usage
 
 ### CLI
 
@@ -75,9 +76,9 @@ guardar.
 sqldr query -c kennis-dev "SELECT * FROM users LIMIT 10"
 ```
 
-Imprime las filas como tabla. Si la conexión es `read_only`, cualquier
-sentencia de escritura se rechaza antes de tocar la red. Un `UPDATE`/`DELETE`
-sin `WHERE` pide confirmación interactiva por stdin.
+Prints rows as a table. On a `read_only` connection, any write statement
+is rejected before it ever reaches the network. An `UPDATE`/`DELETE`
+without a `WHERE` clause prompts for interactive confirmation on stdin.
 
 ### TUI
 
@@ -85,58 +86,58 @@ sin `WHERE` pide confirmación interactiva por stdin.
 sqldr
 ```
 
-Sin subcomando, arranca la interfaz interactiva.
+With no subcommand, launches the interactive interface.
 
-| Tecla | Acción |
+| Key | Action |
 |---|---|
-| `Tab` / `Shift+Tab` | ciclar foco sidebar → editor → resultados |
-| `↑`/`↓`/`Enter` en sidebar | navegar conexiones/bases; seleccionar una base abre una tab con sus tablas |
-| `←`/`→` en una tab | cambiar entre tabs de bases de datos abiertas |
-| `x` en una tab | cerrar la tab activa |
-| `Esc` en una tab | volver al árbol de conexiones |
-| `/` en sidebar | buscar tablas por nombre en todas las conexiones |
-| `Ctrl+Enter` / `F5` | ejecutar la query del editor (`Ctrl+Enter` requiere terminal con protocolo Kitty; `F5` funciona en cualquiera) |
-| `Ctrl+C` | cancelar la query en curso |
-| `Ctrl+R` | historial de queries de la conexión activa |
-| `Ctrl+E` | editar la query en `$EDITOR` |
-| `Ctrl+N` | wizard para agregar una conexión nueva |
-| `PageUp`/`PageDown` en resultados | paginar (toda `SELECT` sin `LIMIT` propio recibe uno automático de 500 filas) |
-| `y` / `Y` / `c` / `i` en resultados | copiar celda / fila como JSON / CSV / `INSERT` (vía OSC 52, funciona sobre SSH) |
-| Mouse | click para enfocar/seleccionar, arrastrar los bordes para redimensionar sidebar/editor |
-| `q` | salir |
+| `Tab` / `Shift+Tab` | cycle focus: sidebar → editor → results |
+| `↑`/`↓`/`Enter` in sidebar | navigate connections/databases; selecting a database opens a tab with its tables |
+| `←`/`→` in a tab | switch between open database tabs |
+| `x` in a tab | close the active tab |
+| `Esc` in a tab | go back to the connection tree |
+| `/` in sidebar | search tables by name across every connection |
+| `Ctrl+Enter` / `F5` | run the editor's query (`Ctrl+Enter` needs a Kitty-protocol terminal; `F5` works everywhere) |
+| `Ctrl+C` | cancel the running query |
+| `Ctrl+R` | query history for the active connection |
+| `Ctrl+E` | edit the query in `$EDITOR` |
+| `Ctrl+N` | wizard to add a new connection |
+| `PageUp`/`PageDown` in results | page through results (every `SELECT` without its own `LIMIT` gets an automatic 500-row one) |
+| `y` / `Y` / `c` / `i` in results | copy cell / row as JSON / CSV / `INSERT` (via OSC 52, works over SSH) |
+| Mouse | click to focus/select, drag borders to resize sidebar/editor |
+| `q` | quit |
 
-Todo lo que se ejecuta se refleja en el editor (incluido el `LIMIT`/`OFFSET`
-automático), así que podés editarlo y volver a correrlo — si borrás el
-límite que agregó `sqldr`, se respeta y corre sin límite.
+Whatever actually runs is mirrored into the editor (including the
+auto-applied `LIMIT`/`OFFSET`), so you can edit and rerun it — if you
+delete the limit `sqldr` added, that's honored and it runs unbounded.
 
-## Arquitectura
+## Architecture
 
 ```
 crates/
-  sqldr-core/     # trait Driver, tipos (Row, Value, Schema...), sin UI
+  sqldr-core/     # Driver trait, types (Row, Value, Schema...), no UI
     driver.rs
-    mysql.rs      # implementación con sqlx
-    guard.rs      # guardarraíles: is_mutating, needs_where_confirmation
-    history.rs    # historial de queries por conexión (JSONL)
-    pagination.rs # LIMIT/OFFSET automático
+    mysql.rs      # sqlx-backed implementation
+    guard.rs      # guardrails: is_mutating, needs_where_confirmation
+    history.rs    # per-connection query history (JSONL)
+    pagination.rs # automatic LIMIT/OFFSET
   sqldr/          # TUI + CLI
-    main.rs       # clap: `sqldr` (TUI) y `sqldr query`/`conn`
-    app.rs        # estado global + event loop
+    main.rs       # clap: `sqldr` (TUI) and `sqldr query`/`conn`
+    app.rs        # global state + event loop
     config.rs     # config.toml + keyring
-    clipboard.rs  # OSC 52 + formatos JSON/CSV/INSERT
-    tui.rs        # terminal setup, integración $EDITOR
-    ui/           # sidebar, editor, resultados, overlays, statusbar
-docs/archive/     # ADRs: decisiones no triviales documentadas
+    clipboard.rs  # OSC 52 + JSON/CSV/INSERT formats
+    tui.rs        # terminal setup, $EDITOR integration
+    ui/           # sidebar, editor, results, overlays, statusbar
+docs/archive/     # ADRs: non-trivial decisions, documented
 ```
 
-## Contribuir
+## Contributing
 
-- `cargo fmt` y `cargo clippy -- -D warnings` antes de cada cambio (si tu
-  entorno no tiene esos componentes instalados, al menos `cargo build
-  --workspace` y `cargo test --workspace` deben pasar limpio).
-- Decisiones no triviales van a `docs/archive/` como ADR.
-- Commits pequeños, uno por cambio lógico.
+- Run `cargo fmt` and `cargo clippy -- -D warnings` before each change (if
+  your environment doesn't have those components installed, at minimum
+  `cargo build --workspace` and `cargo test --workspace` must pass clean).
+- Non-trivial decisions go to `docs/archive/` as an ADR.
+- Small commits, one per logical change.
 
-## Licencia
+## License
 
-Por definir.
+TBD.
