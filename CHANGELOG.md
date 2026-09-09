@@ -1,5 +1,59 @@
 # Changelog
 
+## [1.2.0] - 2026-09-09
+
+### Añadido
+- **`EXPLAIN` accesible desde la TUI** (`Ctrl+X` / `F6`): corre la query
+  del editor a través de `EXPLAIN` y muestra el plan en el panel de
+  resultados, sin pasar por el guardrail de mutación ni la confirmación
+  de `WHERE` (`EXPLAIN` nunca toca datos). El backend ya lo tenía
+  implementado desde la 1.0; simplemente nunca estaba cableado a ninguna
+  tecla.
+- **Editar y borrar conexiones desde la TUI** (`e` / `d` sobre un nodo de
+  conexión): antes solo se podía agregar una conexión nueva; ahora el
+  wizard se reabre pre-llenado para editar (con fallback al password ya
+  guardado en el keyring para el test en vivo si el campo queda en
+  blanco), y borrar pide confirmación antes de limpiar `config.toml`, el
+  keyring, y cualquier tab abierto de esa conexión.
+- **Heartbeat de conexión**: un `SELECT 1` de fondo cada 20s detecta sola
+  una conexión caída (antes solo se notaba al ejecutar la próxima
+  query), y el sidebar muestra `(Ns)` desde el último ping exitoso.
+- **Explorador de estructura de tabla** (`s` sobre una fila de tabla):
+  vista de solo lectura con columnas (tipo/nulabilidad/key), índices y
+  foreign keys — sin query adicional, ya estaba cargado.
+- **Navegación por foreign key** (`g` sobre una celda de resultados): si
+  la columna bajo el cursor es un FK, salta a la fila referenciada
+  (`SELECT * FROM tabla_ref WHERE col_ref = valor`). Requiere que la
+  tabla se haya abierto como preview desde el sidebar (no funciona sobre
+  una query arbitraria tipeada a mano).
+- `sqldr-core`: `Driver::tables()` ahora también trae metadata de
+  foreign keys (`information_schema.KEY_COLUMN_USAGE`), en batch junto a
+  columnas e índices (4 queries por base en vez de 3).
+- `docs/IDEAS.md`: backlog de ideas priorizado para futuras iteraciones.
+
+### Corregido
+- **Bug real encontrado en vivo**: editar una conexión dejando el campo
+  de password en blanco (para no cambiarlo) hacía fallar el test de
+  credenciales con `1045 Access denied`, porque el test en vivo no caía
+  de vuelta al password ya guardado en el keyring. Corregido.
+- **Bug real encontrado en vivo**: borrar una conexión mientras otra
+  conexión (con heartbeat activo) quedaba en un índice posterior dejaba
+  el heartbeat de esa otra conexión apuntando a un índice viejo/inválido
+  tras el corrimiento de la lista — sus eventos de heartbeat se perdían
+  silenciosamente o corrompían el estado de otra conexión. Corregido
+  re-lanzando el heartbeat de cada conexión sobreviviente con su índice
+  correcto tras un borrado.
+- **`EXPLAIN` no daba ningún feedback con el editor vacío**: reportado
+  en vivo por el usuario ("no pasa nada" al presionar `Ctrl+X`/`F6`
+  navegando por el sidebar sin haber escrito una query) — el chequeo de
+  "editor vacío" retornaba en silencio antes de mostrar cualquier error.
+  Ahora muestra `nothing to explain: the editor is empty`.
+- Se agregó `F6` como fallback sin modificador para `EXPLAIN` (mismo
+  patrón que `Ctrl+Enter`/`F5` ya usa para ejecutar), para terminales/
+  multiplexores que no reenvíen `Ctrl+<letra>` de forma confiable.
+
+---
+
 ## [1.0.0]
 
 Primera versión estable: TUI + CLI funcional para administrar bases MySQL,
