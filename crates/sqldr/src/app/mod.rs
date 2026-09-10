@@ -6,6 +6,7 @@
 //! types, the `App` struct itself, and the top-level key/event dispatch
 //! that routes into those modules.
 
+mod autocomplete;
 mod mouse;
 mod query;
 mod results;
@@ -369,6 +370,12 @@ pub enum Overlay {
     /// indexes, and foreign keys, from the already-loaded [`Table`].
     /// Any key dismisses it.
     TableStructure { db_name: String, table: Table },
+    /// Completion popup (`Ctrl+Space`/`F7` in the editor): candidates
+    /// (keywords + table/column names from the open tab) matching the
+    /// identifier prefix immediately before the cursor when triggered.
+    /// `anchor` is that prefix's `(row, col)` start and `replace_len` its
+    /// length, so accepting a candidate knows exactly what to splice out.
+    Autocomplete { candidates: Vec<String>, selected: usize, anchor: (usize, usize), replace_len: usize },
 }
 
 /// Events fed into the main select loop, whatever their origin (terminal,
@@ -555,7 +562,13 @@ impl App {
         match self.focus {
             Focus::Sidebar => self.on_sidebar_key(key),
             Focus::Editor => {
-                self.editor.input(key);
+                if key.code == KeyCode::F(7)
+                    || (key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    self.open_autocomplete();
+                } else {
+                    self.editor.input(key);
+                }
             }
             Focus::Results => self.on_results_key(key),
         }
@@ -575,6 +588,9 @@ impl App {
             Some(Overlay::TableStructure { .. }) => {
                 // Read-only info popup: any key dismisses it — already
                 // removed from `self.overlay` by `.take()` above.
+            }
+            Some(Overlay::Autocomplete { candidates, selected, anchor, replace_len }) => {
+                self.on_autocomplete_key(candidates, selected, anchor, replace_len, key)
             }
             None => {}
         }
@@ -1147,5 +1163,38 @@ mod tests {
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
         assert!(app.overlay.is_none(), "any key must dismiss the read-only structure popup");
+    }
+
+    #[test]
+    fn autocomplete_requires_an_active_connection() {
+        let mut app = test_app();
+        app.focus = Focus::Editor;
+        app.set_editor_sql("SEL");
+
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::F(7), KeyModifiers::NONE)));
+
+        assert!(
+            matches!(&app.status, StatusMessage::Error(e) if e.contains("no active connection")),
+            "F7 with no active connection must report it, not silently do nothing"
+        );
+        assert!(app.overlay.is_none());
+    }
+
+    #[test]
+    fn autocomplete_requires_a_ready_connection() {
+        let mut app = test_app();
+        app.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
+        app.active_conn = Some(0);
+        app.focus = Focus::Editor;
+        app.set_editor_sql("SEL");
+
+        // Ctrl+Space is the other trigger, alongside F7.
+        app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)));
+
+        assert!(
+            matches!(&app.status, StatusMessage::Error(e) if e.contains("connection not ready")),
+            "triggering autocomplete on an Idle connection (never connected) must report it"
+        );
+        assert!(app.overlay.is_none());
     }
 }

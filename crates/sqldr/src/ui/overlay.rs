@@ -37,6 +37,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         Overlay::Settings { selected, .. } => render_settings(frame, theme, *selected),
         Overlay::ConfirmDeleteConnection { name, .. } => render_confirm_delete(frame, theme, name),
         Overlay::TableStructure { db_name, table } => render_table_structure(frame, theme, db_name, table),
+        Overlay::Autocomplete { candidates, selected, .. } => {
+            render_autocomplete(frame, theme, candidates, *selected)
+        }
     }
 }
 
@@ -282,4 +285,23 @@ fn render_table_structure(frame: &mut Frame, theme: Theme, db_name: &str, table:
 
     let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, area);
+}
+
+/// Completion popup (`Ctrl+Space`/`F7`): a plain scrollable list of
+/// matching keywords/table/column names — Up/Down to pick, Enter/Tab to
+/// insert, Esc to cancel.
+fn render_autocomplete(frame: &mut Frame, theme: Theme, candidates: &[String], selected: usize) {
+    let area = centered(50, 60, frame.area());
+    frame.render_widget(Clear, area);
+
+    let items: Vec<ListItem> = candidates.iter().map(|c| ListItem::new(c.as_str())).collect();
+    let block = Block::default()
+        .title("Complete (↑/↓, Enter/Tab: insert, Esc: cancel)")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+    let list = List::new(items).block(block).highlight_style(highlight_style(theme));
+
+    let mut state = ListState::default();
+    state.select(Some(selected.min(candidates.len().saturating_sub(1))));
+    frame.render_stateful_widget(list, area, &mut state);
 }

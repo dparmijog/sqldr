@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     spans.push(Span::raw(
-        " | Tab: focus  f: favorite  e/d: edit/delete conn  s: structure  g: follow FK  Ctrl+Enter/F5: run  Ctrl+X/F6: explain  Ctrl+C: cancel  Ctrl+R: history  Ctrl+N: new connection  Ctrl+O: options  Ctrl+E: $EDITOR  q: quit",
+        " | Tab: focus  f: favorite  e/d: edit/delete conn  s: structure  g: follow FK  Ctrl+Enter/F5: run  Ctrl+X/F6: explain  Ctrl+Space/F7: complete  Ctrl+C: cancel  Ctrl+R: history  Ctrl+N: new connection  Ctrl+O: options  Ctrl+E: $EDITOR  q: quit",
     ));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

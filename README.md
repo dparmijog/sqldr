@@ -13,11 +13,12 @@ speaks exclusively to that trait, never to MySQL directly.
 
 - **Supported engine:** MySQL (via [`sqlx`](https://github.com/launchbadge/sqlx)).
 - **CLI:** `sqldr query`, `sqldr conn set-password`.
-- **TUI:** sidebar (connections → databases → per-table tabs), SQL editor,
-  paginated results, history, guardrails, mouse support, a connection
-  wizard that can also edit/delete existing connections, a background
-  heartbeat that flags a dropped connection on its own, `EXPLAIN`,
-  and table-structure/foreign-key navigation.
+- **TUI:** sidebar (connections → databases → per-table tabs), SQL editor
+  with dialect-aware syntax highlighting and autocomplete, paginated
+  results, history, guardrails, mouse support, a connection wizard that
+  can also edit/delete existing connections, a background heartbeat
+  that flags a dropped connection on its own, `EXPLAIN`, and
+  table-structure/foreign-key navigation.
 
 ## Requirements
 
@@ -106,6 +107,7 @@ With no subcommand, launches the interactive interface.
 | `Ctrl+E` | edit the query in `$EDITOR` |
 | `Ctrl+N` | wizard to add a new connection |
 | `Ctrl+X` / `F6` | run the editor's query through `EXPLAIN` instead of executing it (`F6` if your terminal/multiplexer doesn't forward `Ctrl+<letter>` combos reliably) |
+| `Ctrl+Space` / `F7` in the editor | completion popup: dialect keywords + the open tab's table/column names, filtered by the identifier prefix under the cursor |
 | `PageUp`/`PageDown` in results | page through results (every `SELECT` without its own `LIMIT` gets an automatic 500-row one) |
 | `g` in results | follow a foreign-key cell to the referenced row (needs a table preview, not an arbitrary query) |
 | `y` / `Y` / `c` / `i` in results | copy cell / row as JSON / CSV / `INSERT` (via OSC 52, works over SSH) |

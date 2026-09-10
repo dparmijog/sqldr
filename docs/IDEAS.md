@@ -34,31 +34,38 @@ same day; the rest stay here for later.
    roadmap in the README. `Driver`/`Dialect` are already designed for
    this without touching the TUI; it's the biggest gap between "promised"
    and "delivered" today.
-6. **Autocomplete in the editor.** Table/column names from the already
-   loaded `Schema`/`Table` state; doesn't need real SQL parsing, a
-   prefix-match over known identifiers already helps a lot.
-7. **Persist open tabs between sessions.** Every launch starts fresh from
+6. **[done, `Ctrl+Space`/`F7`]** Autocomplete in the editor. A static,
+   prefix-filtered popup over the dialect's keyword vocabulary
+   (`Dialect::keywords()`) plus the open tab's table/column names — no
+   real SQL parsing, matches by identifier prefix under the cursor.
+7. **[done]** Dialect-aware SQL syntax highlighting. Not originally on
+   this list — added alongside autocomplete since both need the same
+   `Dialect::keywords()` vocabulary. Keywords/strings/numbers/comments
+   colored per the active theme; lights up once connected (the
+   vocabulary is per-engine, so a future Postgres/SQLite connection
+   highlights with its own keywords automatically).
+8. **Persist open tabs between sessions.** Every launch starts fresh from
    the connection tree. Explicit "restore session" (not to be confused
    with the removed implicit "recents" pinning) would save real daily
    friction for a fixed set of frequently-used databases.
-8. **Export results to a file.** `y`/`Y`/`c`/`i` copy a cell/row via OSC
+9. **Export results to a file.** `y`/`Y`/`c`/`i` copy a cell/row via OSC
    52, but there's no way to dump a full result set to `.csv`/`.json` on
    disk for datasets too large for the visible buffer.
 
 ## Longer-term / architectural
 
-9. **[done, `s`]** Table structure explorer. `s` on a table row in an
-   open tab shows a read-only view of its columns (type/nullability/key),
-   indexes, and foreign keys — all already present on the loaded `Table`,
-   so it needs no extra query.
-10. **[done, `g`]** Foreign-key navigation. `g` on a cell in the results
+10. **[done, `s`]** Table structure explorer. `s` on a table row in an
+    open tab shows a read-only view of its columns (type/nullability/key),
+    indexes, and foreign keys — all already present on the loaded `Table`,
+    so it needs no extra query.
+11. **[done, `g`]** Foreign-key navigation. `g` on a cell in the results
     grid that's a FK jumps to the referenced row (`SELECT * FROM ref_table
     WHERE ref_col = <value>`). Needs a table preview (`source_table` set)
     since that's where the FK metadata comes from; doesn't work from an
     arbitrary hand-typed query.
-11. **SSH tunnel / bastion support.** `ConnConfig` currently assumes
+12. **SSH tunnel / bastion support.** `ConnConfig` currently assumes
     direct connectivity via `url`; real-world setups often need a tunnel.
-12. **Explicit transaction handling.** `BEGIN`/`COMMIT`/`ROLLBACK` tracked
+13. **Explicit transaction handling.** `BEGIN`/`COMMIT`/`ROLLBACK` tracked
     and surfaced by the UI (visible "you're in an open transaction"
     indicator), instead of leaving it as plain SQL with no visual
     feedback of state.
