@@ -166,9 +166,42 @@ pub enum AppEvent {
     HeartbeatError(usize, String),
 }
 
-pub struct App {
+/// Everything about the set of configured connections and the "use this
+/// database" tabs opened from them — domain state describing what's
+/// connected and loaded, independent of how the sidebar happens to be
+/// scrolled or laid out on screen.
+pub struct ConnectionsState {
     pub conns: Vec<ConnState>,
     pub active_conn: Option<usize>,
+    /// Open "use this database" tabs.
+    pub tabs: Vec<DbTab>,
+    /// Index into `tabs` currently shown in the sidebar; `None` shows the
+    /// connection tree instead.
+    pub active_tab: Option<usize>,
+    /// Favorited databases, pinned atop the sidebar tree.
+    pub favorites: Favorites,
+    /// A pinned-database open request waiting on its connection's schema
+    /// to finish loading (see `sidebar::open_pinned_database`).
+    pending_open: Option<DbRef>,
+    /// Lazily loaded per-connection query history, keyed by connection name.
+    history: HashMap<String, History>,
+}
+
+/// The SQL currently being edited/executed and its results — domain
+/// state independent of the editor pane's on-screen geometry.
+pub struct QueryState {
+    pub editor: TextArea<'static>,
+    /// Pre-pagination form of the last query synced into the editor —
+    /// deleting our auto-appended `LIMIT`/`OFFSET` back to exactly this
+    /// text and rerunning is treated as "run unbounded, on purpose".
+    last_synced_base_sql: Option<String>,
+    pub results: ResultsState,
+    pub cancel: Option<CancellationToken>,
+}
+
+pub struct App {
+    pub conn: ConnectionsState,
+    pub query: QueryState,
     pub focus: Focus,
     pub sidebar_cursor: usize,
     /// Top row currently visible in the sidebar; kept in sync with
@@ -178,26 +211,9 @@ pub struct App {
     /// Active table search text (`/` in the sidebar). `None` = normal tree
     /// navigation; `Some(text)` = flat search across every loaded table.
     pub sidebar_filter: Option<String>,
-    /// Open "use this database" tabs.
-    pub tabs: Vec<DbTab>,
-    /// Index into `tabs` currently shown in the sidebar; `None` shows the
-    /// connection tree instead.
-    pub active_tab: Option<usize>,
-    pub editor: TextArea<'static>,
-    /// Pre-pagination form of the last query synced into the editor —
-    /// deleting our auto-appended `LIMIT`/`OFFSET` back to exactly this
-    /// text and rerunning is treated as "run unbounded, on purpose".
-    last_synced_base_sql: Option<String>,
-    pub results: ResultsState,
     pub status: StatusMessage,
     pub quit: bool,
-    pub cancel: Option<CancellationToken>,
     pub overlay: Option<Overlay>,
-    /// Favorited databases, pinned atop the sidebar tree.
-    pub favorites: Favorites,
-    /// A pinned-database open request waiting on its connection's schema
-    /// to finish loading (see `sidebar::open_pinned_database`).
-    pending_open: Option<DbRef>,
     /// Active color palette; changed live from the options dialog
     /// (`Ctrl+O`) and persisted to `config.toml` on confirm.
     pub theme: Theme,
@@ -209,8 +225,6 @@ pub struct App {
     /// against the same layout the user is looking at.
     pub last_area: ratatui::layout::Rect,
     drag: Option<mouse::Drag>,
-    /// Lazily loaded per-connection query history, keyed by connection name.
-    history: HashMap<String, History>,
     pub events: mpsc::UnboundedSender<AppEvent>,
 }
 
@@ -220,29 +234,33 @@ impl App {
         editor.set_placeholder_text("-- write SQL, Ctrl+Enter to run");
         let theme = Theme::by_name(config.theme.as_deref().unwrap_or(""));
         App {
-            conns: config.connections.into_iter().map(ConnState::new).collect(),
-            active_conn: None,
+            conn: ConnectionsState {
+                conns: config.connections.into_iter().map(ConnState::new).collect(),
+                active_conn: None,
+                tabs: Vec::new(),
+                active_tab: None,
+                favorites,
+                pending_open: None,
+                history: HashMap::new(),
+            },
+            query: QueryState {
+                editor,
+                last_synced_base_sql: None,
+                results: ResultsState::default(),
+                cancel: None,
+            },
             focus: Focus::Sidebar,
             sidebar_cursor: 0,
             sidebar_scroll_top: 0,
             sidebar_filter: None,
-            tabs: Vec::new(),
-            active_tab: None,
-            editor,
-            last_synced_base_sql: None,
-            results: ResultsState::default(),
             status: StatusMessage::Idle,
             quit: false,
-            cancel: None,
             overlay: None,
-            favorites,
-            pending_open: None,
             theme,
             sidebar_width_pct: 25,
             editor_height: 7,
             last_area: ratatui::layout::Rect::default(),
             drag: None,
-            history: HashMap::new(),
             events,
         }
     }
@@ -252,7 +270,7 @@ impl App {
     /// options dialog so persisting one setting never drops the other.
     fn to_config(&self) -> Config {
         Config {
-            connections: self.conns.iter().map(|c| c.entry.clone()).collect(),
+            connections: self.conn.conns.iter().map(|c| c.entry.clone()).collect(),
             theme: Some(self.theme.name.to_string()),
         }
     }
@@ -261,7 +279,7 @@ impl App {
     /// the status line) since favorites are a convenience, not the source
     /// of truth for anything else in the app.
     fn persist_favorites(&mut self) {
-        let result = crate::config::favorites_path().and_then(|path| self.favorites.save(&path));
+        let result = crate::config::favorites_path().and_then(|path| self.conn.favorites.save(&path));
         if let Err(e) = result {
             self.status = StatusMessage::Error(format!("could not save favorites: {e}"));
         }
@@ -325,7 +343,7 @@ impl App {
                 {
                     self.open_autocomplete();
                 } else {
-                    self.editor.input(key);
+                    self.query.editor.input(key);
                 }
             }
             Focus::Results => self.on_results_key(key),
@@ -370,59 +388,59 @@ impl App {
             AppEvent::Mouse(mouse) => self.on_mouse(mouse),
             AppEvent::Resize => {}
             AppEvent::QueryRow(row) => {
-                if self.results.cols.is_empty() {
-                    self.results.cols = row.cols.clone();
-                    self.results.col_widths =
-                        self.results.cols.iter().map(|c| (c.chars().count() as u16).clamp(4, 40)).collect();
+                if self.query.results.cols.is_empty() {
+                    self.query.results.cols = row.cols.clone();
+                    self.query.results.col_widths =
+                        self.query.results.cols.iter().map(|c| (c.chars().count() as u16).clamp(4, 40)).collect();
                 }
                 for (i, v) in row.values.iter().enumerate() {
-                    if let Some(w) = self.results.col_widths.get_mut(i) {
+                    if let Some(w) = self.query.results.col_widths.get_mut(i) {
                         let len = (v.to_string().chars().count() as u16).clamp(4, 40);
                         if len > *w {
                             *w = len;
                         }
                     }
                 }
-                self.results.rows.push(row);
+                self.query.results.rows.push(row);
             }
             AppEvent::QueryDone => {
-                self.results.running = false;
-                self.cancel = None;
+                self.query.results.running = false;
+                self.query.cancel = None;
                 self.status = StatusMessage::Idle;
             }
             AppEvent::QueryError(e) => {
-                self.results.running = false;
-                self.cancel = None;
+                self.query.results.running = false;
+                self.query.cancel = None;
                 self.status = StatusMessage::Error(e);
             }
             AppEvent::Connected(ci, driver) => {
-                self.conns[ci].status = ConnStatus::Connected(Arc::clone(&driver));
+                self.conn.conns[ci].status = ConnStatus::Connected(Arc::clone(&driver));
                 self.start_heartbeat(ci, driver);
             }
             AppEvent::SchemaLoaded(ci, schema) => {
-                self.conns[ci].schema = Some(*schema);
-                if matches!(&self.pending_open, Some(t) if self.conns[ci].entry.name == t.conn) {
+                self.conn.conns[ci].schema = Some(*schema);
+                if matches!(&self.conn.pending_open, Some(t) if self.conn.conns[ci].entry.name == t.conn) {
                     self.open_pinned_database_from_schema(ci);
                 }
             }
             AppEvent::TablesLoaded(ci, db_name, tables) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
+                if let Some(tab) = self.conn.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
                     tab.tables = TablesState::Loaded(tables);
                 }
             }
             AppEvent::TablesError(ci, db_name, e) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
+                if let Some(tab) = self.conn.tabs.iter_mut().find(|t| t.conn_idx == ci && t.db_name == db_name) {
                     tab.tables = TablesState::Error(e.clone());
                 }
                 self.status = StatusMessage::Error(format!("tables for '{db_name}': {e}"));
             }
             AppEvent::SchemaError(ci, e) => {
-                self.conns[ci].status = ConnStatus::Error(e.clone());
-                self.status = StatusMessage::Error(format!("schema '{}': {e}", self.conns[ci].entry.name));
+                self.conn.conns[ci].status = ConnStatus::Error(e.clone());
+                self.status = StatusMessage::Error(format!("schema '{}': {e}", self.conn.conns[ci].entry.name));
             }
             AppEvent::ConnectError(ci, e) => {
-                self.conns[ci].status = ConnStatus::Error(e.clone());
-                self.status = StatusMessage::Error(format!("connecting '{}': {e}", self.conns[ci].entry.name));
+                self.conn.conns[ci].status = ConnStatus::Error(e.clone());
+                self.status = StatusMessage::Error(format!("connecting '{}': {e}", self.conn.conns[ci].entry.name));
             }
             AppEvent::WizardTested(id, result) => {
                 let is_current = matches!(
@@ -449,13 +467,13 @@ impl App {
                 self.overlay = Some(Overlay::AddConnection(wizard));
             }
             AppEvent::HeartbeatOk(ci) => {
-                if let Some(conn) = self.conns.get_mut(ci) {
+                if let Some(conn) = self.conn.conns.get_mut(ci) {
                     conn.last_ping = Some(std::time::Instant::now());
                 }
             }
             AppEvent::HeartbeatError(ci, e) => {
-                let name = self.conns.get(ci).map(|c| c.entry.name.clone()).unwrap_or_default();
-                if let Some(conn) = self.conns.get_mut(ci) {
+                let name = self.conn.conns.get(ci).map(|c| c.entry.name.clone()).unwrap_or_default();
+                if let Some(conn) = self.conn.conns.get_mut(ci) {
                     conn.status = ConnStatus::Error(e.clone());
                     conn.heartbeat_cancel = None;
                 }
@@ -627,8 +645,8 @@ mod tests {
     #[test]
     fn sidebar_nodes_lists_favorites_then_connections() {
         let mut app = test_app();
-        app.favorites.favorites.push(DbRef { conn: "a".into(), db: "fav".into() });
-        app.conns.push(ConnState::new(ConnEntry { name: "a".into(), url: "mysql://x".into(), read_only: false }));
+        app.conn.favorites.favorites.push(DbRef { conn: "a".into(), db: "fav".into() });
+        app.conn.conns.push(ConnState::new(ConnEntry { name: "a".into(), url: "mysql://x".into(), read_only: false }));
 
         let nodes = app.sidebar_nodes();
         assert!(matches!(nodes[0], SidebarNode::Favorite(0)), "favorites come first");
@@ -651,13 +669,13 @@ mod tests {
 
         let mut app = test_app();
         let db_ref = DbRef { conn: "demo".into(), db: "billing".into() };
-        app.favorites.favorites.push(db_ref.clone());
+        app.conn.favorites.favorites.push(db_ref.clone());
         app.sidebar_cursor = 0;
         assert!(matches!(app.sidebar_nodes().first(), Some(SidebarNode::Favorite(0))));
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
 
-        assert!(!app.favorites.is_favorite(&db_ref), "f must un-favorite the selected pinned entry");
+        assert!(!app.conn.favorites.is_favorite(&db_ref), "f must un-favorite the selected pinned entry");
         let saved = Favorites::load(&crate::config::favorites_path().unwrap());
         assert!(!saved.is_favorite(&db_ref), "toggling favorite must persist to disk");
 
@@ -676,14 +694,14 @@ mod tests {
         let mut app = test_app();
         let mut conn = conn_with_databases("acme", vec!["billing".into()]);
         conn.expanded = true;
-        app.conns.push(conn);
+        app.conn.conns.push(conn);
         // sidebar_nodes(): [Connection(0), Database(0,0)] — no favorites/recents.
         app.sidebar_cursor = 1;
         app.activate_sidebar_node();
 
-        assert_eq!(app.tabs.len(), 1, "selecting a database must open its tab");
+        assert_eq!(app.conn.tabs.len(), 1, "selecting a database must open its tab");
         assert!(
-            matches!(app.tabs[0].tables, TablesState::Loading),
+            matches!(app.conn.tabs[0].tables, TablesState::Loading),
             "tables must start Loading, never eagerly populated, when opening a database tab"
         );
         assert_eq!(app.active_tab_table_count(), 0, "table count must be 0 while still loading");
@@ -692,7 +710,7 @@ mod tests {
     #[test]
     fn database_search_matches_scoped_to_database_names_only() {
         let mut app = test_app();
-        app.conns.push(conn_with_databases("acme", vec!["billing".into(), "reporting".into()]));
+        app.conn.conns.push(conn_with_databases("acme", vec!["billing".into(), "reporting".into()]));
         app.sidebar_filter = Some("bill".into());
 
         let matches = app.sidebar_database_search_matches();
@@ -703,8 +721,8 @@ mod tests {
     #[test]
     fn table_search_is_scoped_to_the_open_tab_only() {
         let mut app = test_app();
-        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
-        app.tabs.push(DbTab {
+        app.conn.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.conn.tabs.push(DbTab {
             conn_idx: 0,
             db_idx: 0,
             db_name: "billing".into(),
@@ -713,11 +731,11 @@ mod tests {
                 Table { name: "customers".into(), columns: vec![], indexes: vec![], foreign_keys: vec![] },
             ]),
         });
-        app.active_tab = Some(0);
+        app.conn.active_tab = Some(0);
         app.sidebar_filter = Some("inv".into());
 
         let matches = app.sidebar_table_search_matches();
-        let TablesState::Loaded(tables) = &app.tabs[0].tables else { unreachable!() };
+        let TablesState::Loaded(tables) = &app.conn.tabs[0].tables else { unreachable!() };
         assert_eq!(matches.len(), 1);
         assert_eq!(tables[matches[0]].name, "invoices");
     }
@@ -725,16 +743,16 @@ mod tests {
     #[test]
     fn pending_open_resolves_once_schema_loads() {
         let mut app = test_app();
-        app.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
+        app.conn.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
         // Simulate opening a favorite database before its connection has
         // ever been expanded.
-        app.pending_open = Some(DbRef { conn: "acme".into(), db: "billing".into() });
+        app.conn.pending_open = Some(DbRef { conn: "acme".into(), db: "billing".into() });
 
         app.on_app_event(AppEvent::SchemaLoaded(0, Box::new(Schema { databases: vec!["billing".into()] })));
 
-        assert_eq!(app.tabs.len(), 1, "resolving pending_open must open the matching db tab");
-        assert_eq!(app.tabs[0].db_name, "billing");
-        assert!(app.pending_open.is_none(), "pending_open must clear once the database tab is opened");
+        assert_eq!(app.conn.tabs.len(), 1, "resolving pending_open must open the matching db tab");
+        assert_eq!(app.conn.tabs[0].db_name, "billing");
+        assert!(app.conn.pending_open.is_none(), "pending_open must clear once the database tab is opened");
     }
 
     #[test]
@@ -742,7 +760,7 @@ mod tests {
         let mut app = test_app();
         let mut conn = conn_with_databases("acme", vec!["billing".into(), "reporting".into()]);
         conn.expanded = true;
-        app.conns.push(conn);
+        app.conn.conns.push(conn);
         // sidebar_nodes(): [Connection(0), Database(0,0)=billing, Database(0,1)=reporting].
         app.sidebar_cursor = 1; // billing
 
@@ -776,7 +794,7 @@ mod tests {
         std::env::set_var("SQLDR_CONFIG_DIR", &dir);
 
         let mut app = test_app();
-        app.conns.push(ConnState::new(ConnEntry {
+        app.conn.conns.push(ConnState::new(ConnEntry {
             name: "acme".into(),
             url: "mysql://olduser@127.0.0.1:3306/db1".into(),
             read_only: false,
@@ -800,9 +818,9 @@ mod tests {
         app.overlay = Some(Overlay::AddConnection(wizard));
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
 
-        assert_eq!(app.conns.len(), 1, "editing must replace the entry in place, not add a second one");
-        assert!(app.conns[0].entry.read_only, "edited fields must be saved");
-        assert!(app.conns[0].entry.url.ends_with("/db2"), "the newly picked database must be saved");
+        assert_eq!(app.conn.conns.len(), 1, "editing must replace the entry in place, not add a second one");
+        assert!(app.conn.conns[0].entry.read_only, "edited fields must be saved");
+        assert!(app.conn.conns[0].entry.url.ends_with("/db2"), "the newly picked database must be saved");
         assert!(app.overlay.is_none(), "finalizing must close the wizard");
 
         std::env::remove_var("SQLDR_CONFIG_DIR");
@@ -821,17 +839,17 @@ mod tests {
         std::env::set_var("SQLDR_CONFIG_DIR", &dir);
 
         let mut app = test_app();
-        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.conn.conns.push(conn_with_databases("acme", vec!["billing".into()]));
         let cancel = tokio_util::sync::CancellationToken::new();
-        app.conns[0].heartbeat_cancel = Some(cancel.clone());
-        app.tabs.push(DbTab {
+        app.conn.conns[0].heartbeat_cancel = Some(cancel.clone());
+        app.conn.tabs.push(DbTab {
             conn_idx: 0,
             db_idx: 0,
             db_name: "billing".into(),
             tables: TablesState::Loading,
         });
-        app.active_tab = Some(0);
-        app.active_conn = Some(0);
+        app.conn.active_tab = Some(0);
+        app.conn.active_conn = Some(0);
         app.sidebar_cursor = 0;
 
         app.request_delete_selected_connection();
@@ -845,10 +863,10 @@ mod tests {
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
 
-        assert!(app.conns.is_empty(), "connection must be removed");
-        assert!(app.tabs.is_empty(), "tabs backed by the removed connection must close");
-        assert!(app.active_tab.is_none());
-        assert!(app.active_conn.is_none());
+        assert!(app.conn.conns.is_empty(), "connection must be removed");
+        assert!(app.conn.tabs.is_empty(), "tabs backed by the removed connection must close");
+        assert!(app.conn.active_tab.is_none());
+        assert!(app.conn.active_conn.is_none());
         assert!(cancel.is_cancelled(), "deleting a connection must cancel its background heartbeat loop");
 
         std::env::remove_var("SQLDR_CONFIG_DIR");
@@ -860,8 +878,8 @@ mod tests {
         use sqldr_core::{ForeignKey, Value};
 
         let mut app = test_app();
-        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
-        app.tabs.push(DbTab {
+        app.conn.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.conn.tabs.push(DbTab {
             conn_idx: 0,
             db_idx: 0,
             db_name: "billing".into(),
@@ -876,15 +894,15 @@ mod tests {
                 }],
             }]),
         });
-        app.active_conn = Some(0);
-        app.results.cols = vec!["id".into(), "customer_id".into()];
-        app.results.rows =
-            vec![Row { cols: app.results.cols.clone(), values: vec![Value::Int(1), Value::Int(42)] }];
-        app.results.source_table = Some(("billing".into(), "invoices".into()));
+        app.conn.active_conn = Some(0);
+        app.query.results.cols = vec!["id".into(), "customer_id".into()];
+        app.query.results.rows =
+            vec![Row { cols: app.query.results.cols.clone(), values: vec![Value::Int(1), Value::Int(42)] }];
+        app.query.results.source_table = Some(("billing".into(), "invoices".into()));
         app.focus = Focus::Results;
 
         // Cursor on `id` (not a FK): must be rejected with a specific error.
-        app.results.cursor_col = 0;
+        app.query.results.cursor_col = 0;
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
         assert!(
             matches!(&app.status, StatusMessage::Error(e) if e.contains("is not a foreign key")),
@@ -894,7 +912,7 @@ mod tests {
         // Cursor on `customer_id` (a real FK): must resolve past FK
         // lookup, only failing later on "connection not ready" since this
         // test has no live driver to actually run the follow-up query.
-        app.results.cursor_col = 1;
+        app.query.results.cursor_col = 1;
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
         assert!(
             matches!(&app.status, StatusMessage::Error(e) if e.contains("connection not ready")),
@@ -907,8 +925,8 @@ mod tests {
         use sqldr_core::Column;
 
         let mut app = test_app();
-        app.conns.push(conn_with_databases("acme", vec!["billing".into()]));
-        app.tabs.push(DbTab {
+        app.conn.conns.push(conn_with_databases("acme", vec!["billing".into()]));
+        app.conn.tabs.push(DbTab {
             conn_idx: 0,
             db_idx: 0,
             db_name: "billing".into(),
@@ -919,7 +937,7 @@ mod tests {
                 foreign_keys: vec![],
             }]),
         });
-        app.active_tab = Some(0);
+        app.conn.active_tab = Some(0);
         app.sidebar_cursor = 0;
 
         app.on_app_event(AppEvent::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
@@ -953,8 +971,8 @@ mod tests {
     #[test]
     fn autocomplete_requires_a_ready_connection() {
         let mut app = test_app();
-        app.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
-        app.active_conn = Some(0);
+        app.conn.conns.push(ConnState::new(ConnEntry { name: "acme".into(), url: "mysql://x".into(), read_only: false }));
+        app.conn.active_conn = Some(0);
         app.focus = Focus::Editor;
         app.set_editor_sql("SEL");
 

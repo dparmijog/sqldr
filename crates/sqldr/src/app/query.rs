@@ -36,7 +36,7 @@ impl HistoryPicker {
 
 impl App {
     pub(super) fn run_editor_query(&mut self) {
-        let sql = self.editor.lines().join("\n");
+        let sql = self.query.editor.lines().join("\n");
         if sql.trim().is_empty() {
             return;
         }
@@ -44,7 +44,7 @@ impl App {
         // un-paginated base (i.e. the user deleted the `LIMIT`/`OFFSET` we
         // appended and re-ran), honor that as "run unbounded" instead of
         // silently reinstating the auto-limit they just removed.
-        let unbounded = self.last_synced_base_sql.as_deref() == Some(sql.as_str());
+        let unbounded = self.query.last_synced_base_sql.as_deref() == Some(sql.as_str());
         self.maybe_confirm_and_run(sql, None, true, unbounded);
     }
 
@@ -54,16 +54,16 @@ impl App {
     /// never touches data, even for an `UPDATE`/`DELETE`, so it's safe on
     /// a read-only connection too.
     pub(super) fn run_editor_explain(&mut self) {
-        let sql = self.editor.lines().join("\n");
+        let sql = self.query.editor.lines().join("\n");
         if sql.trim().is_empty() {
             self.status = StatusMessage::Error("nothing to explain: the editor is empty".into());
             return;
         }
-        let Some(ci) = self.active_conn else {
+        let Some(ci) = self.conn.active_conn else {
             self.status = StatusMessage::Error("no active connection: pick one in the sidebar".into());
             return;
         };
-        let driver = match &self.conns[ci].status {
+        let driver = match &self.conn.conns[ci].status {
             ConnStatus::Connected(driver) => Arc::clone(driver),
             _ => {
                 self.status = StatusMessage::Error("connection not ready yet".into());
@@ -71,7 +71,7 @@ impl App {
             }
         };
 
-        self.results = ResultsState { running: true, ..ResultsState::default() };
+        self.query.results = ResultsState { running: true, ..ResultsState::default() };
         self.status = StatusMessage::Running;
 
         let tx = self.events.clone();
@@ -161,17 +161,17 @@ impl App {
     }
 
     pub(super) fn open_history_picker(&mut self) {
-        let Some(ci) = self.active_conn else {
+        let Some(ci) = self.conn.active_conn else {
             self.status = StatusMessage::Error("no active connection".into());
             return;
         };
-        let name = self.conns[ci].entry.name.clone();
+        let name = self.conn.conns[ci].entry.name.clone();
         let items = self.history_for(&name).entries().iter().map(|e| e.sql.clone()).collect();
         self.overlay = Some(Overlay::History(HistoryPicker { items, filter: String::new(), selected: 0 }));
     }
 
     fn history_for(&mut self, conn_name: &str) -> &mut History {
-        self.history.entry(conn_name.to_string()).or_insert_with(|| {
+        self.conn.history.entry(conn_name.to_string()).or_insert_with(|| {
             let path = crate::config::history_path(conn_name).unwrap_or_else(|_| {
                 std::env::temp_dir().join(format!("sqldr-history-{conn_name}.jsonl"))
             });
@@ -188,10 +188,10 @@ impl App {
     /// typing continues naturally from there.
     pub(crate) fn set_editor_sql(&mut self, sql: &str) {
         let lines: Vec<String> = sql.lines().map(String::from).collect();
-        self.editor = tui_textarea::TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
-        self.editor.move_cursor(tui_textarea::CursorMove::Bottom);
-        self.editor.move_cursor(tui_textarea::CursorMove::End);
-        self.editor.set_placeholder_text("-- write SQL, Ctrl+Enter to run");
+        self.query.editor = tui_textarea::TextArea::new(if lines.is_empty() { vec![String::new()] } else { lines });
+        self.query.editor.move_cursor(tui_textarea::CursorMove::Bottom);
+        self.query.editor.move_cursor(tui_textarea::CursorMove::End);
+        self.query.editor.set_placeholder_text("-- write SQL, Ctrl+Enter to run");
     }
 
     /// `pagination_request` is `Some((page, page_size))` to auto-paginate
@@ -205,12 +205,12 @@ impl App {
         record_history: bool,
         pagination_request: Option<(usize, u64)>,
     ) {
-        let Some(ci) = self.active_conn else {
+        let Some(ci) = self.conn.active_conn else {
             self.status = StatusMessage::Error("no active connection: pick one in the sidebar".into());
             return;
         };
         let (read_only, name) = {
-            let entry = &self.conns[ci].entry;
+            let entry = &self.conn.conns[ci].entry;
             (entry.read_only, entry.name.clone())
         };
         if read_only && is_mutating(&sql) {
@@ -219,7 +219,7 @@ impl App {
             ));
             return;
         }
-        let driver = match &self.conns[ci].status {
+        let driver = match &self.conn.conns[ci].status {
             ConnStatus::Connected(driver) => Arc::clone(driver),
             _ => {
                 self.status = StatusMessage::Error("connection not ready yet".into());
@@ -242,12 +242,12 @@ impl App {
         // LIMIT/OFFSET — so the user can see it and freely edit/rerun (and
         // remember the pre-pagination form, so deleting the LIMIT back to
         // it and rerunning is recognized as "run unbounded").
-        self.last_synced_base_sql = Some(sql);
+        self.query.last_synced_base_sql = Some(sql);
         self.set_editor_sql(&exec_sql);
 
         let cancel = CancellationToken::new();
-        self.cancel = Some(cancel.clone());
-        self.results = ResultsState { running: true, source_table, pagination, ..ResultsState::default() };
+        self.query.cancel = Some(cancel.clone());
+        self.query.results = ResultsState { running: true, source_table, pagination, ..ResultsState::default() };
         self.status = StatusMessage::Running;
 
         let tx = self.events.clone();
@@ -258,10 +258,10 @@ impl App {
     }
 
     pub(super) fn cancel_running_query(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
+        if let Some(cancel) = self.query.cancel.take() {
             cancel.cancel();
             self.status = StatusMessage::Info("query cancelled".into());
-            self.results.running = false;
+            self.query.results.running = false;
         }
     }
 
@@ -270,7 +270,7 @@ impl App {
     /// `(ci, db_name)` so a closed/reopened tab can't be clobbered by a
     /// stale in-flight request.
     pub(super) fn load_tables_for(&mut self, ci: usize, db_name: String) {
-        let ConnStatus::Connected(driver) = &self.conns[ci].status else { return };
+        let ConnStatus::Connected(driver) = &self.conn.conns[ci].status else { return };
         let driver = Arc::clone(driver);
         let db_name_for_fetch = db_name.clone();
         self.spawn_into_event(
@@ -283,8 +283,8 @@ impl App {
     }
 
     pub(super) fn connect_and_load_schema(&mut self, ci: usize) {
-        self.conns[ci].status = ConnStatus::Connecting;
-        let entry = self.conns[ci].entry.clone();
+        self.conn.conns[ci].status = ConnStatus::Connecting;
+        let entry = self.conn.conns[ci].entry.clone();
         let tx = self.events.clone();
         tokio::spawn(async move {
             let url = match crate::config::resolve_url(&entry) {
@@ -322,11 +322,11 @@ impl App {
     /// reconnecting/editing a connection must never leave two loops
     /// pinging in parallel.
     pub(super) fn start_heartbeat(&mut self, ci: usize, driver: Arc<dyn Driver>) {
-        if let Some(prev) = self.conns[ci].heartbeat_cancel.take() {
+        if let Some(prev) = self.conn.conns[ci].heartbeat_cancel.take() {
             prev.cancel();
         }
         let cancel = CancellationToken::new();
-        self.conns[ci].heartbeat_cancel = Some(cancel.clone());
+        self.conn.conns[ci].heartbeat_cancel = Some(cancel.clone());
         let tx = self.events.clone();
         tokio::spawn(async move {
             loop {

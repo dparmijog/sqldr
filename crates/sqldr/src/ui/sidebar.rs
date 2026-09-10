@@ -16,11 +16,11 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Sidebar;
 
     let (title, labels): (String, Vec<String>) = if let Some(filter) = &app.sidebar_filter {
-        if let Some(active) = app.active_tab {
+        if let Some(active) = app.conn.active_tab {
             let matches = app.sidebar_table_search_matches();
             let title = format!("Search table: {filter}_  ({} — Esc: exit)", matches.len());
             let empty_tables = Vec::new();
-            let tables = match &app.tabs[active].tables {
+            let tables = match &app.conn.tabs[active].tables {
                 TablesState::Loaded(tables) => tables,
                 _ => &empty_tables,
             };
@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                 matches.iter().map(|&(ci, di)| app.sidebar_database_search_label(ci, di)).collect();
             (title, labels)
         }
-    } else if let Some(active) = app.active_tab {
+    } else if let Some(active) = app.conn.active_tab {
         (tab_title(app, active), tab_table_labels(app, active))
     } else {
         let nodes = app.sidebar_nodes();
@@ -82,14 +82,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Breadcrumb title for tab mode: every open tab, the active one bracketed
 /// and starred if favorited, plus the key hints for switching/closing tabs.
 fn tab_title(app: &App, active: usize) -> String {
-    let crumbs: Vec<String> = app
-        .tabs
+    let crumbs: Vec<String> = app.conn.tabs
         .iter()
         .enumerate()
         .map(|(i, tab)| {
-            let conn_name = app.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
+            let conn_name = app.conn.conns.get(tab.conn_idx).map(|c| c.entry.name.as_str()).unwrap_or("?");
             let db_ref = DbRef { conn: conn_name.to_string(), db: tab.db_name.clone() };
-            let star = if app.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            let star = if app.conn.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
             let name = format!("{star}{conn_name}/{}", tab.db_name);
             if i == active { format!("[{name}]") } else { name }
         })
@@ -98,7 +97,7 @@ fn tab_title(app: &App, active: usize) -> String {
 }
 
 fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
-    match &app.tabs[active].tables {
+    match &app.conn.tabs[active].tables {
         TablesState::Loading => vec!["loading tables…".to_string()],
         TablesState::Error(e) => vec![format!("error loading tables: {e}")],
         TablesState::Loaded(tables) => tables.iter().map(|t| format!("\u{00b7} {}", t.name)).collect(),
@@ -107,14 +106,13 @@ fn tab_table_labels(app: &App, active: usize) -> Vec<String> {
 
 fn label(app: &App, node: &SidebarNode) -> String {
     match *node {
-        SidebarNode::Favorite(idx) => app
-            .favorites
+        SidebarNode::Favorite(idx) => app.conn.favorites
             .favorites
             .get(idx)
             .map(|db| format!("\u{2605} {}", db.label()))
             .unwrap_or_else(|| "?".to_string()),
         SidebarNode::Connection(ci) => {
-            let conn = &app.conns[ci];
+            let conn = &app.conn.conns[ci];
             let icon = match &conn.status {
                 ConnStatus::Idle => "○",
                 ConnStatus::Connecting => "◐",
@@ -138,10 +136,10 @@ fn label(app: &App, node: &SidebarNode) -> String {
             }
         }
         SidebarNode::Database(ci, di) => {
-            let conn = &app.conns[ci];
+            let conn = &app.conn.conns[ci];
             let name = conn.schema.as_ref().and_then(|s| s.databases.get(di)).map(|name| name.as_str()).unwrap_or("?");
             let db_ref = DbRef { conn: conn.entry.name.clone(), db: name.to_string() };
-            let star = if app.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
+            let star = if app.conn.favorites.is_favorite(&db_ref) { "\u{2605} " } else { "" };
             format!("  ▸ {star}{name}")
         }
     }

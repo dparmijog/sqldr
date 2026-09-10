@@ -117,7 +117,7 @@ async fn run_app(terminal: &mut Term, config: Config, enhanced_keys: bool) -> Re
 async fn edit_in_external_editor(terminal: &mut Term, app: &mut App, enhanced_keys: bool) -> Result<()> {
     let editor_cmd = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
     let tmp_path = std::env::temp_dir().join(format!("sqldr-{}.sql", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp_path, app.editor.lines().join("\n")) {
+    if let Err(e) = std::fs::write(&tmp_path, app.query.editor.lines().join("\n")) {
         app.status = crate::app::StatusMessage::Error(format!("could not create temp file: {e}"));
         return Ok(());
     }

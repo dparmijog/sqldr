@@ -11,7 +11,7 @@ use crate::app::{App, ConnStatus, Focus, StatusMessage};
 pub fn render(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = Vec::new();
 
-    match app.active_conn.and_then(|ci| app.conns.get(ci)) {
+    match app.conn.active_conn.and_then(|ci| app.conn.conns.get(ci)) {
         Some(conn) => {
             let state = match &conn.status {
                 ConnStatus::Idle => "idle",

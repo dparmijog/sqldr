@@ -54,9 +54,9 @@ impl App {
         if point_in(areas.sidebar, x, y) {
             self.focus = Focus::Sidebar;
             if self.sidebar_filter.is_none() {
-                if let Some(active) = self.active_tab {
+                if let Some(active) = self.conn.active_tab {
                     let (ci, di) = {
-                        let tab = &self.tabs[active];
+                        let tab = &self.conn.tabs[active];
                         (tab.conn_idx, tab.db_idx)
                     };
                     let table_count = self.active_tab_table_count();
@@ -88,11 +88,11 @@ impl App {
 
         if point_in(areas.results, x, y) {
             self.focus = Focus::Results;
-            if !self.results.rows.is_empty() {
+            if !self.query.results.rows.is_empty() {
                 // Border + header row precede the data rows.
                 let clicked = y.saturating_sub(areas.results.y + 2) as usize;
-                self.results.cursor_row =
-                    (self.results.scroll_top + clicked).min(self.results.rows.len() - 1);
+                self.query.results.cursor_row =
+                    (self.query.results.scroll_top + clicked).min(self.query.results.rows.len() - 1);
             }
         }
     }

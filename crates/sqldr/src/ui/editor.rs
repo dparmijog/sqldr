@@ -18,7 +18,7 @@ use crate::sql_highlight;
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Editor;
     let border_color = if focused { app.theme.accent } else { app.theme.muted };
-    let mut editor = app.editor.clone();
+    let mut editor = app.query.editor.clone();
     editor.set_block(
         Block::default()
             .title("Editor (Ctrl+Enter to run)")
@@ -31,15 +31,14 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = Block::default().borders(Borders::ALL).inner(area);
     frame.render_widget(&editor, area);
 
-    if app.editor.is_empty() || inner.width == 0 || inner.height == 0 {
+    if app.query.editor.is_empty() || inner.width == 0 || inner.height == 0 {
         // Placeholder text is rendered instead of real content; nothing
         // to tokenize.
         return;
     }
 
-    let keywords = app
-        .active_conn
-        .and_then(|ci| app.conns.get(ci))
+    let keywords = app.conn.active_conn
+        .and_then(|ci| app.conn.conns.get(ci))
         .and_then(|c| match &c.status {
             ConnStatus::Connected(driver) => Some(driver.dialect().keywords()),
             _ => None,
@@ -51,23 +50,24 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // `sqldr` renders a fresh `app.editor.clone()` every frame (see
+    // `sqldr` renders a fresh `app.query.editor.clone()` every frame (see
     // above), and `TextArea::clone()` copies `Viewport`'s *current*
-    // stored offset — but nothing ever writes that back to `app.editor`
-    // itself (only the throwaway clone's copy gets updated, and it's
-    // dropped at the end of this function). So `app.editor`'s viewport
-    // never advances past its `Viewport::default()` baseline of `(0, 0)`,
+    // stored offset — but nothing ever writes that back to
+    // `app.query.editor` itself (only the throwaway clone's copy gets
+    // updated, and it's dropped at the end of this function). So
+    // `app.query.editor`'s viewport never advances past its
+    // `Viewport::default()` baseline of `(0, 0)`,
     // and the real widget recomputes scroll from that frozen zero every
     // single render. Match that exactly — a persisted offset here would
     // silently drift from what's actually on screen.
-    let (cursor_row, cursor_col) = app.editor.cursor();
+    let (cursor_row, cursor_col) = app.query.editor.cursor();
     let height = inner.height;
     let width = inner.width;
     let top_row = sql_highlight::next_scroll_top(0, cursor_row as u16, height);
     let top_col = sql_highlight::next_scroll_top(0, cursor_col as u16, width);
 
     let theme = app.theme;
-    let lines = app.editor.lines();
+    let lines = app.query.editor.lines();
     let buf = frame.buffer_mut();
     for screen_row in 0..height {
         let Some(line) = lines.get((top_row + screen_row) as usize) else { break };

@@ -48,10 +48,10 @@ impl App {
     /// frequently-used database never needs re-navigating.
     pub fn sidebar_nodes(&self) -> Vec<SidebarNode> {
         let mut nodes = Vec::new();
-        for i in 0..self.favorites.favorites.len() {
+        for i in 0..self.conn.favorites.favorites.len() {
             nodes.push(SidebarNode::Favorite(i));
         }
-        for (ci, conn) in self.conns.iter().enumerate() {
+        for (ci, conn) in self.conn.conns.iter().enumerate() {
             nodes.push(SidebarNode::Connection(ci));
             if !conn.expanded {
                 continue;
@@ -70,7 +70,7 @@ impl App {
             self.on_sidebar_search_key(key);
             return;
         }
-        if self.active_tab.is_some() {
+        if self.conn.active_tab.is_some() {
             self.on_sidebar_tab_key(key);
             return;
         }
@@ -117,10 +117,10 @@ impl App {
                 self.sidebar_scroll_top = 0;
             }
             KeyCode::Enter => {
-                if let Some(active) = self.active_tab {
+                if let Some(active) = self.conn.active_tab {
                     let matches = self.sidebar_table_search_matches();
                     if let Some(&ti) = matches.get(self.sidebar_cursor) {
-                        let (ci, di) = (self.tabs[active].conn_idx, self.tabs[active].db_idx);
+                        let (ci, di) = (self.conn.tabs[active].conn_idx, self.conn.tabs[active].db_idx);
                         self.sidebar_filter = None;
                         self.preview_table(ci, di, ti);
                     }
@@ -136,7 +136,7 @@ impl App {
                 self.sidebar_cursor = self.sidebar_cursor.saturating_sub(1);
             }
             KeyCode::Down => {
-                let len = if self.active_tab.is_some() {
+                let len = if self.conn.active_tab.is_some() {
                     self.sidebar_table_search_matches().len()
                 } else {
                     self.sidebar_database_search_matches().len()
@@ -167,17 +167,17 @@ impl App {
     /// still loading (or failed), so Up/Down/Enter stay inert until
     /// `AppEvent::TablesLoaded` actually arrives.
     pub(super) fn active_tab_table_count(&self) -> usize {
-        let Some(active) = self.active_tab else { return 0 };
-        match &self.tabs[active].tables {
+        let Some(active) = self.conn.active_tab else { return 0 };
+        match &self.conn.tabs[active].tables {
             TablesState::Loaded(tables) => tables.len(),
             TablesState::Loading | TablesState::Error(_) => 0,
         }
     }
 
     fn on_sidebar_tab_key(&mut self, key: KeyEvent) {
-        let Some(active) = self.active_tab else { return };
+        let Some(active) = self.conn.active_tab else { return };
         let (ci, di) = {
-            let tab = &self.tabs[active];
+            let tab = &self.conn.tabs[active];
             (tab.conn_idx, tab.db_idx)
         };
         let table_count = self.active_tab_table_count();
@@ -194,7 +194,7 @@ impl App {
                 self.toggle_favorite_selected();
             }
             KeyCode::Esc => {
-                self.active_tab = None;
+                self.conn.active_tab = None;
                 self.sidebar_cursor = 0;
                 self.sidebar_scroll_top = 0;
             }
@@ -224,21 +224,21 @@ impl App {
     /// (see [`TablesState`]) starts here, the first time the tab is
     /// created — never eagerly for every database up front.
     fn open_db_tab(&mut self, ci: usize, di: usize) {
-        self.active_conn = Some(ci);
-        let db_name = self.conns[ci]
+        self.conn.active_conn = Some(ci);
+        let db_name = self.conn.conns[ci]
             .schema
             .as_ref()
             .and_then(|s| s.databases.get(di))
             .cloned()
             .unwrap_or_default();
 
-        let pos = self.tabs.iter().position(|t| t.conn_idx == ci && t.db_idx == di);
-        self.active_tab = Some(match pos {
+        let pos = self.conn.tabs.iter().position(|t| t.conn_idx == ci && t.db_idx == di);
+        self.conn.active_tab = Some(match pos {
             Some(pos) => pos,
             None => {
-                self.tabs.push(DbTab { conn_idx: ci, db_idx: di, db_name: db_name.clone(), tables: TablesState::Loading });
+                self.conn.tabs.push(DbTab { conn_idx: ci, db_idx: di, db_name: db_name.clone(), tables: TablesState::Loading });
                 self.load_tables_for(ci, db_name);
-                self.tabs.len() - 1
+                self.conn.tabs.len() - 1
             }
         });
         self.sidebar_cursor = 0;
@@ -246,21 +246,21 @@ impl App {
     }
 
     fn close_active_tab(&mut self) {
-        let Some(idx) = self.active_tab else { return };
-        self.tabs.remove(idx);
-        self.active_tab = if self.tabs.is_empty() { None } else { Some(idx.min(self.tabs.len() - 1)) };
+        let Some(idx) = self.conn.active_tab else { return };
+        self.conn.tabs.remove(idx);
+        self.conn.active_tab = if self.conn.tabs.is_empty() { None } else { Some(idx.min(self.conn.tabs.len() - 1)) };
         self.sidebar_cursor = 0;
         self.sidebar_scroll_top = 0;
     }
 
     fn switch_tab(&mut self, delta: i64) {
-        let Some(idx) = self.active_tab else { return };
-        if self.tabs.is_empty() {
+        let Some(idx) = self.conn.active_tab else { return };
+        if self.conn.tabs.is_empty() {
             return;
         }
-        let len = self.tabs.len() as i64;
+        let len = self.conn.tabs.len() as i64;
         let new_idx = (idx as i64 + delta).rem_euclid(len) as usize;
-        self.active_tab = Some(new_idx);
+        self.conn.active_tab = Some(new_idx);
         self.sidebar_cursor = 0;
         self.sidebar_scroll_top = 0;
     }
@@ -270,13 +270,13 @@ impl App {
         let Some(node) = nodes.get(self.sidebar_cursor) else { return };
         match *node {
             SidebarNode::Favorite(idx) => {
-                if let Some(db_ref) = self.favorites.favorites.get(idx).cloned() {
+                if let Some(db_ref) = self.conn.favorites.favorites.get(idx).cloned() {
                     self.open_pinned_database(db_ref);
                 }
             }
             SidebarNode::Connection(ci) => {
-                self.active_conn = Some(ci);
-                let conn = &mut self.conns[ci];
+                self.conn.active_conn = Some(ci);
+                let conn = &mut self.conn.conns[ci];
                 conn.expanded = !conn.expanded;
                 if conn.expanded && conn.schema.is_none() && matches!(conn.status, ConnStatus::Idle | ConnStatus::Error(_)) {
                     self.connect_and_load_schema(ci);
@@ -295,18 +295,18 @@ impl App {
     /// tab-open until `AppEvent::SchemaLoaded` arrives (see
     /// `pending_open`).
     fn open_pinned_database(&mut self, db_ref: DbRef) {
-        let Some(ci) = self.conns.iter().position(|c| c.entry.name == db_ref.conn) else {
+        let Some(ci) = self.conn.conns.iter().position(|c| c.entry.name == db_ref.conn) else {
             self.status = StatusMessage::Error(format!("connection '{}' no longer exists", db_ref.conn));
             return;
         };
-        self.active_conn = Some(ci);
-        self.pending_open = Some(db_ref);
-        if self.conns[ci].schema.is_none() {
-            self.conns[ci].expanded = true;
-            if matches!(self.conns[ci].status, ConnStatus::Idle | ConnStatus::Error(_)) {
+        self.conn.active_conn = Some(ci);
+        self.conn.pending_open = Some(db_ref);
+        if self.conn.conns[ci].schema.is_none() {
+            self.conn.conns[ci].expanded = true;
+            if matches!(self.conn.conns[ci].status, ConnStatus::Idle | ConnStatus::Error(_)) {
                 self.connect_and_load_schema(ci);
             }
-            self.status = StatusMessage::Info(format!("connecting to '{}'…", self.conns[ci].entry.name));
+            self.status = StatusMessage::Info(format!("connecting to '{}'…", self.conn.conns[ci].entry.name));
             return;
         }
         self.open_pinned_database_from_schema(ci);
@@ -317,8 +317,8 @@ impl App {
     /// connection's schema is available, either immediately or after
     /// `AppEvent::SchemaLoaded` arrives.
     pub(super) fn open_pinned_database_from_schema(&mut self, ci: usize) {
-        let Some(db_ref) = self.pending_open.take() else { return };
-        let Some(schema) = &self.conns[ci].schema else { return };
+        let Some(db_ref) = self.conn.pending_open.take() else { return };
+        let Some(schema) = &self.conn.conns[ci].schema else { return };
         let Some(di) = schema.databases.iter().position(|name| *name == db_ref.db) else {
             self.status = StatusMessage::Error(format!(
                 "database '{}' not found on '{}'",
@@ -330,11 +330,11 @@ impl App {
     }
 
     pub(super) fn preview_table(&mut self, ci: usize, di: usize, ti: usize) {
-        let Some(tab) = self.tabs.iter().find(|t| t.conn_idx == ci && t.db_idx == di) else { return };
+        let Some(tab) = self.conn.tabs.iter().find(|t| t.conn_idx == ci && t.db_idx == di) else { return };
         let TablesState::Loaded(tables) = &tab.tables else { return };
         let Some(table_name) = tables.get(ti).map(|t| t.name.clone()) else { return };
         let db_name = tab.db_name.clone();
-        let Some(ConnStatus::Connected(driver)) = self.conns.get(ci).map(|c| &c.status) else {
+        let Some(ConnStatus::Connected(driver)) = self.conn.conns.get(ci).map(|c| &c.status) else {
             self.status = StatusMessage::Error("connection not ready".into());
             return;
         };
@@ -342,7 +342,7 @@ impl App {
         let sql =
             format!("SELECT * FROM {}.{}", dialect.quote_ident(&db_name), dialect.quote_ident(&table_name));
         let source_table = Some((db_name, table_name));
-        self.active_conn = Some(ci);
+        self.conn.active_conn = Some(ci);
         self.focus = super::Focus::Results;
         // The default page (LIMIT 500) is a convenience, not a deliberate
         // query the user wants to recall later, so it doesn't get recorded.
@@ -353,7 +353,7 @@ impl App {
     /// for a table already loaded in an open tab — no new query needed,
     /// `Driver::tables` already fetched all of this.
     pub(super) fn show_table_structure(&mut self, ci: usize, di: usize, ti: usize) {
-        let Some(tab) = self.tabs.iter().find(|t| t.conn_idx == ci && t.db_idx == di) else { return };
+        let Some(tab) = self.conn.tabs.iter().find(|t| t.conn_idx == ci && t.db_idx == di) else { return };
         let TablesState::Loaded(tables) = &tab.tables else { return };
         let Some(table) = tables.get(ti).cloned() else { return };
         let db_name = tab.db_name.clone();
@@ -369,9 +369,9 @@ impl App {
         if self.sidebar_filter.is_some() {
             return None;
         }
-        if let Some(active) = self.active_tab {
-            let tab = &self.tabs[active];
-            let conn = self.conns.get(tab.conn_idx)?.entry.name.clone();
+        if let Some(active) = self.conn.active_tab {
+            let tab = &self.conn.tabs[active];
+            let conn = self.conn.conns.get(tab.conn_idx)?.entry.name.clone();
             return Some(DbRef { conn, db: tab.db_name.clone() });
         }
         self.node_db_ref(self.sidebar_nodes().get(self.sidebar_cursor)?)
@@ -383,15 +383,15 @@ impl App {
     /// resizes).
     fn node_db_ref(&self, node: &SidebarNode) -> Option<DbRef> {
         match *node {
-            SidebarNode::Favorite(idx) => self.favorites.favorites.get(idx).cloned(),
+            SidebarNode::Favorite(idx) => self.conn.favorites.favorites.get(idx).cloned(),
             SidebarNode::Connection(_) => None,
             SidebarNode::Database(ci, di) => self.db_ref_for(ci, di),
         }
     }
 
     fn db_ref_for(&self, ci: usize, di: usize) -> Option<DbRef> {
-        let conn = self.conns.get(ci)?.entry.name.clone();
-        let db = self.conns.get(ci)?.schema.as_ref()?.databases.get(di)?.clone();
+        let conn = self.conn.conns.get(ci)?.entry.name.clone();
+        let db = self.conn.conns.get(ci)?.schema.as_ref()?.databases.get(di)?.clone();
         Some(DbRef { conn, db })
     }
 
@@ -400,12 +400,12 @@ impl App {
         // `(ci, di)` so the cursor can return to that exact row after
         // toggling — not just "some node with the same database", which
         // would jump to the newly (un)pinned row instead.
-        let tree_node = match self.active_tab.is_none().then(|| self.sidebar_nodes().get(self.sidebar_cursor).cloned()).flatten() {
+        let tree_node = match self.conn.active_tab.is_none().then(|| self.sidebar_nodes().get(self.sidebar_cursor).cloned()).flatten() {
             Some(SidebarNode::Database(ci, di)) => Some((ci, di)),
             _ => None,
         };
         let Some(db_ref) = self.selected_db_ref() else { return };
-        let now_favorite = self.favorites.toggle(db_ref.clone());
+        let now_favorite = self.conn.favorites.toggle(db_ref.clone());
         self.persist_favorites();
         self.status = StatusMessage::Info(if now_favorite {
             format!("\u{2605} added to favorites: {}", db_ref.label())
@@ -416,7 +416,7 @@ impl App {
         // the tree, shifting every index below it — follow the cursor to
         // wherever the same logical selection landed instead of leaving
         // it on whatever now occupies the old index.
-        if self.active_tab.is_none() {
+        if self.conn.active_tab.is_none() {
             let nodes = self.sidebar_nodes();
             let new_idx = match tree_node {
                 Some((ci, di)) => {
@@ -437,7 +437,7 @@ impl App {
     /// search tables while I'm looking at databases" behavior wanted.
     pub fn sidebar_database_search_nodes(&self) -> Vec<(usize, usize)> {
         let mut nodes = Vec::new();
-        for (ci, conn) in self.conns.iter().enumerate() {
+        for (ci, conn) in self.conn.conns.iter().enumerate() {
             if let Some(schema) = &conn.schema {
                 for di in 0..schema.databases.len() {
                     nodes.push((ci, di));
@@ -461,9 +461,8 @@ impl App {
     }
 
     pub fn sidebar_database_search_label(&self, ci: usize, di: usize) -> String {
-        let conn_name = self.conns.get(ci).map(|c| c.entry.name.as_str()).unwrap_or("?");
-        let db_name = self
-            .conns
+        let conn_name = self.conn.conns.get(ci).map(|c| c.entry.name.as_str()).unwrap_or("?");
+        let db_name = self.conn.conns
             .get(ci)
             .and_then(|c| c.schema.as_ref())
             .and_then(|s| s.databases.get(di))
@@ -477,8 +476,8 @@ impl App {
     /// the "once I've picked a database, sure, search its tables" request.
     /// Empty while that tab's tables are still loading.
     pub fn sidebar_table_search_matches(&self) -> Vec<usize> {
-        let Some(active) = self.active_tab else { return Vec::new() };
-        let TablesState::Loaded(tables) = &self.tabs[active].tables else { return Vec::new() };
+        let Some(active) = self.conn.active_tab else { return Vec::new() };
+        let TablesState::Loaded(tables) = &self.conn.tabs[active].tables else { return Vec::new() };
         let Some(filter) = &self.sidebar_filter else { return Vec::new() };
         let needle = filter.to_ascii_lowercase();
         (0..tables.len())

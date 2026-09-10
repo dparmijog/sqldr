@@ -13,13 +13,13 @@ use crate::app::{App, Focus};
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Results;
-    let page_info = app.results.pagination.as_ref().map(|p| format!(" — page {} (PgUp/PgDn)", p.page + 1));
-    let title = if app.results.running {
-        format!("Results ({} rows, running…){}", app.results.rows.len(), page_info.unwrap_or_default())
+    let page_info = app.query.results.pagination.as_ref().map(|p| format!(" — page {} (PgUp/PgDn)", p.page + 1));
+    let title = if app.query.results.running {
+        format!("Results ({} rows, running…){}", app.query.results.rows.len(), page_info.unwrap_or_default())
     } else {
         format!(
             "Results ({} rows){} — y/Y/c/i: copy cell/row JSON/CSV/INSERT",
-            app.results.rows.len(),
+            app.query.results.rows.len(),
             page_info.unwrap_or_default()
         )
     };
@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused { theme.accent } else { theme.muted }));
 
-    if app.results.cols.is_empty() {
+    if app.query.results.cols.is_empty() {
         frame.render_widget(block, area);
         return;
     }
@@ -37,18 +37,18 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     // Keep the cursor row inside the visible window, scrolling the minimum
     // amount necessary rather than re-centering every move.
     let visible_height = area.height.saturating_sub(3) as usize; // borders + header
-    if !app.results.rows.is_empty() {
-        let cursor = app.results.cursor_row.min(app.results.rows.len() - 1);
-        if cursor < app.results.scroll_top {
-            app.results.scroll_top = cursor;
-        } else if visible_height > 0 && cursor >= app.results.scroll_top + visible_height {
-            app.results.scroll_top = cursor + 1 - visible_height;
+    if !app.query.results.rows.is_empty() {
+        let cursor = app.query.results.cursor_row.min(app.query.results.rows.len() - 1);
+        if cursor < app.query.results.scroll_top {
+            app.query.results.scroll_top = cursor;
+        } else if visible_height > 0 && cursor >= app.query.results.scroll_top + visible_height {
+            app.query.results.scroll_top = cursor + 1 - visible_height;
         }
     }
 
     let sep_style = Style::default().fg(theme.muted);
     let header = UiRow::new(
-        app.results
+        app.query.results
             .cols
             .iter()
             .enumerate()
@@ -56,12 +56,12 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect::<Vec<_>>(),
     );
 
-    let start = app.results.scroll_top.min(app.results.rows.len());
-    let end = (start + visible_height.max(1)).min(app.results.rows.len());
+    let start = app.query.results.scroll_top.min(app.query.results.rows.len());
+    let end = (start + visible_height.max(1)).min(app.query.results.rows.len());
 
-    let cursor_row = app.results.cursor_row;
-    let cursor_col = app.results.cursor_col;
-    let rows = app.results.rows[start..end].iter().enumerate().map(|(offset, row)| {
+    let cursor_row = app.query.results.cursor_row;
+    let cursor_col = app.query.results.cursor_col;
+    let rows = app.query.results.rows[start..end].iter().enumerate().map(|(offset, row)| {
         let absolute = start + offset;
         // Alternating rows are subtly dimmed — a real grid look without
         // needing a dedicated "stripe" color per theme.
@@ -85,8 +85,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
         )
     });
 
-    let widths: Vec<Constraint> = app
-        .results
+    let widths: Vec<Constraint> = app.query.results
         .col_widths
         .iter()
         .enumerate()

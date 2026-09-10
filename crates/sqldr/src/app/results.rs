@@ -72,23 +72,23 @@ impl RowFormat {
 
 impl App {
     pub(super) fn on_results_key(&mut self, key: KeyEvent) {
-        let row_count = self.results.rows.len();
-        let col_count = self.results.cols.len();
+        let row_count = self.query.results.rows.len();
+        let col_count = self.query.results.cols.len();
         match key.code {
             KeyCode::Up => {
-                self.results.cursor_row = self.results.cursor_row.saturating_sub(1);
+                self.query.results.cursor_row = self.query.results.cursor_row.saturating_sub(1);
             }
             KeyCode::Down => {
                 if row_count > 0 {
-                    self.results.cursor_row = (self.results.cursor_row + 1).min(row_count - 1);
+                    self.query.results.cursor_row = (self.query.results.cursor_row + 1).min(row_count - 1);
                 }
             }
             KeyCode::Left => {
-                self.results.cursor_col = self.results.cursor_col.saturating_sub(1);
+                self.query.results.cursor_col = self.query.results.cursor_col.saturating_sub(1);
             }
             KeyCode::Right => {
                 if col_count > 0 {
-                    self.results.cursor_col = (self.results.cursor_col + 1).min(col_count - 1);
+                    self.query.results.cursor_col = (self.query.results.cursor_col + 1).min(col_count - 1);
                 }
             }
             KeyCode::Char('y') => self.copy_selected_cell(),
@@ -103,11 +103,11 @@ impl App {
     }
 
     fn copy_selected_cell(&mut self) {
-        let Some(row) = self.results.rows.get(self.results.cursor_row) else {
+        let Some(row) = self.query.results.rows.get(self.query.results.cursor_row) else {
             self.status = StatusMessage::Error("no row selected".into());
             return;
         };
-        let Some(value) = row.values.get(self.results.cursor_col) else { return };
+        let Some(value) = row.values.get(self.query.results.cursor_col) else { return };
         let text = crate::clipboard::cell_text(value);
         self.report_copy(crate::clipboard::copy(&text), "cell");
     }
@@ -120,22 +120,21 @@ impl App {
     /// while that table's tab is still open (its `foreign_keys` metadata
     /// lives there, already loaded — no extra query needed to look it up).
     fn follow_foreign_key(&mut self) {
-        let Some(ci) = self.active_conn else {
+        let Some(ci) = self.conn.active_conn else {
             self.status = StatusMessage::Error("no active connection".into());
             return;
         };
-        let Some((db, table)) = self.results.source_table.clone() else {
+        let Some((db, table)) = self.query.results.source_table.clone() else {
             self.status = StatusMessage::Error(
                 "foreign-key navigation needs a table preview (open a table from the sidebar first)".into(),
             );
             return;
         };
-        let Some(col_name) = self.results.cols.get(self.results.cursor_col).cloned() else { return };
-        let Some(value) = self
-            .results
+        let Some(col_name) = self.query.results.cols.get(self.query.results.cursor_col).cloned() else { return };
+        let Some(value) = self.query.results
             .rows
-            .get(self.results.cursor_row)
-            .and_then(|r| r.values.get(self.results.cursor_col))
+            .get(self.query.results.cursor_row)
+            .and_then(|r| r.values.get(self.query.results.cursor_col))
             .cloned()
         else {
             self.status = StatusMessage::Error("no row selected".into());
@@ -147,7 +146,7 @@ impl App {
             return;
         };
 
-        let Some(ConnStatus::Connected(driver)) = self.conns.get(ci).map(|c| &c.status) else {
+        let Some(ConnStatus::Connected(driver)) = self.conn.conns.get(ci).map(|c| &c.status) else {
             self.status = StatusMessage::Error("connection not ready".into());
             return;
         };
@@ -166,14 +165,14 @@ impl App {
     }
 
     fn foreign_key_for(&self, ci: usize, db: &str, table: &str, column: &str) -> Option<ForeignKey> {
-        let tab = self.tabs.iter().find(|t| t.conn_idx == ci && t.db_name == db)?;
+        let tab = self.conn.tabs.iter().find(|t| t.conn_idx == ci && t.db_name == db)?;
         let TablesState::Loaded(tables) = &tab.tables else { return None };
         let t = tables.iter().find(|t| t.name == table)?;
         t.foreign_keys.iter().find(|fk| fk.column == column).cloned()
     }
 
     fn copy_selected_row_as(&mut self, format: RowFormat) {
-        let Some(row) = self.results.rows.get(self.results.cursor_row) else {
+        let Some(row) = self.query.results.rows.get(self.query.results.cursor_row) else {
             self.status = StatusMessage::Error("no row selected".into());
             return;
         };
@@ -181,7 +180,7 @@ impl App {
             RowFormat::Json => crate::clipboard::row_json(row),
             RowFormat::Csv => crate::clipboard::row_csv(row),
             RowFormat::Insert => {
-                let Some((db, table)) = &self.results.source_table else {
+                let Some((db, table)) = &self.query.results.source_table else {
                     self.status = StatusMessage::Error(
                         "INSERT not available: this query didn't come from a table".into(),
                     );
@@ -202,7 +201,7 @@ impl App {
 
     /// Re-runs a paginated result set's base query at a different page.
     fn go_to_page(&mut self, delta: i64) {
-        let Some(pagination) = self.results.pagination.clone() else {
+        let Some(pagination) = self.query.results.pagination.clone() else {
             self.status = StatusMessage::Error("pagination not available for this query".into());
             return;
         };
@@ -214,7 +213,7 @@ impl App {
         } else {
             pagination.page + delta as usize
         };
-        let source_table = self.results.source_table.clone();
+        let source_table = self.query.results.source_table.clone();
         // Not a fresh query the user typed — don't record it again.
         self.run_query(pagination.base_sql, source_table, false, Some((new_page, pagination.page_size)));
     }

@@ -274,7 +274,7 @@ impl App {
             wizard.error = Some("name is required".into());
             return Some(wizard);
         }
-        if self.conns.iter().enumerate().any(|(i, c)| c.entry.name == name && Some(i) != wizard.edit_target) {
+        if self.conn.conns.iter().enumerate().any(|(i, c)| c.entry.name == name && Some(i) != wizard.edit_target) {
             wizard.error = Some(format!("a connection named '{name}' already exists"));
             return Some(wizard);
         }
@@ -309,7 +309,7 @@ impl App {
         } else {
             wizard
                 .edit_target
-                .and_then(|idx| self.conns.get(idx))
+                .and_then(|idx| self.conn.conns.get(idx))
                 .and_then(|c| crate::config::get_password(&c.entry.name).ok().flatten())
         };
         if let Some(pw) = &password_for_test {
@@ -366,17 +366,17 @@ impl App {
 
         match wizard.edit_target {
             Some(idx) => {
-                let old_name = self.conns[idx].entry.name.clone();
-                if let Some(cancel) = self.conns[idx].heartbeat_cancel.take() {
+                let old_name = self.conn.conns[idx].entry.name.clone();
+                if let Some(cancel) = self.conn.conns[idx].heartbeat_cancel.take() {
                     cancel.cancel();
                 }
-                self.conns[idx].entry = entry;
+                self.conn.conns[idx].entry = entry;
                 // The old driver/schema no longer match these credentials
                 // (host/user/password/database may all have changed) —
                 // reset so the next expand reconnects from scratch.
-                self.conns[idx].status = super::ConnStatus::Idle;
-                self.conns[idx].schema = None;
-                self.conns[idx].expanded = false;
+                self.conn.conns[idx].status = super::ConnStatus::Idle;
+                self.conn.conns[idx].schema = None;
+                self.conn.conns[idx].expanded = false;
 
                 // Renamed with no fresh password typed: migrate whatever
                 // was already stored, or `resolve_url` would look it up
@@ -388,7 +388,7 @@ impl App {
                 }
             }
             None => {
-                self.conns.push(ConnState::new(entry));
+                self.conn.conns.push(ConnState::new(entry));
             }
         }
 
@@ -420,7 +420,7 @@ impl App {
         let Some(SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
             return;
         };
-        let entry = self.conns[ci].entry.clone();
+        let entry = self.conn.conns[ci].entry.clone();
         self.overlay = Some(Overlay::AddConnection(ConnWizard::for_edit(ci, &entry)));
     }
 
@@ -431,7 +431,7 @@ impl App {
         let Some(SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
             return;
         };
-        let name = self.conns[ci].entry.name.clone();
+        let name = self.conn.conns[ci].entry.name.clone();
         self.overlay = Some(Overlay::ConfirmDeleteConnection { conn_idx: ci, name });
     }
 
@@ -450,13 +450,13 @@ impl App {
     /// password, any open tabs backed by it, and its background
     /// heartbeat loop.
     fn delete_connection(&mut self, idx: usize, name: &str) {
-        if idx >= self.conns.len() {
+        if idx >= self.conn.conns.len() {
             return;
         }
-        if let Some(cancel) = self.conns[idx].heartbeat_cancel.take() {
+        if let Some(cancel) = self.conn.conns[idx].heartbeat_cancel.take() {
             cancel.cancel();
         }
-        self.conns.remove(idx);
+        self.conn.conns.remove(idx);
 
         // Every connection after `idx` just shifted down one slot, but
         // its heartbeat task (if any) already captured its *old* index
@@ -464,8 +464,8 @@ impl App {
         // Heartbeat* events tagged with an index that now names a
         // different connection. Respawn each one so its events carry the
         // corrected index (`start_heartbeat` cancels the stale token).
-        for i in idx..self.conns.len() {
-            if let super::ConnStatus::Connected(driver) = &self.conns[i].status {
+        for i in idx..self.conn.conns.len() {
+            if let super::ConnStatus::Connected(driver) = &self.conn.conns[i].status {
                 let driver = std::sync::Arc::clone(driver);
                 self.start_heartbeat(i, driver);
             }
@@ -474,14 +474,14 @@ impl App {
         // Reindexing every open tab precisely across a removed connection
         // is more complexity than this buys; falling back to the
         // connection tree is always safe and the tabs reopen in a click.
-        self.active_tab = None;
-        self.tabs.retain(|t| t.conn_idx != idx);
-        for t in self.tabs.iter_mut() {
+        self.conn.active_tab = None;
+        self.conn.tabs.retain(|t| t.conn_idx != idx);
+        for t in self.conn.tabs.iter_mut() {
             if t.conn_idx > idx {
                 t.conn_idx -= 1;
             }
         }
-        self.active_conn = match self.active_conn {
+        self.conn.active_conn = match self.conn.active_conn {
             Some(c) if c == idx => None,
             Some(c) if c > idx => Some(c - 1),
             other => other,
