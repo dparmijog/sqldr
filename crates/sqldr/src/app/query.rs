@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use crossterm::event::KeyCode;
-use sqldr_core::{is_mutating, needs_where_confirmation, ConnConfig, Driver, History, MySqlDriver};
+use sqldr_core::{is_mutating, needs_where_confirmation, ConnConfig, Driver, History};
 use tokio_util::sync::CancellationToken;
 
 use super::{App, AppEvent, ConnStatus, HistoryPicker, Overlay, PageState, ResultsState, StatusMessage};
@@ -294,9 +294,8 @@ impl App {
                 }
             };
             let cfg = ConnConfig { name: entry.name.clone(), url, read_only: entry.read_only };
-            match MySqlDriver::connect(&cfg).await {
+            match sqldr_core::connect(&cfg).await {
                 Ok(driver) => {
-                    let driver = Arc::new(driver);
                     let _ = tx.send(AppEvent::Connected(ci, Arc::clone(&driver)));
                     match driver.schema().await {
                         Ok(schema) => {
@@ -321,7 +320,7 @@ impl App {
     /// whatever heartbeat loop was previously running for `ci` first —
     /// reconnecting/editing a connection must never leave two loops
     /// pinging in parallel.
-    pub(super) fn start_heartbeat(&mut self, ci: usize, driver: Arc<MySqlDriver>) {
+    pub(super) fn start_heartbeat(&mut self, ci: usize, driver: Arc<dyn Driver>) {
         if let Some(prev) = self.conns[ci].heartbeat_cancel.take() {
             prev.cancel();
         }

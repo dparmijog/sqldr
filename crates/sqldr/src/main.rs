@@ -10,7 +10,7 @@ mod ui;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
-use sqldr_core::{is_mutating, ConnConfig, Driver, MySqlDriver, Row};
+use sqldr_core::{is_mutating, ConnConfig, Row};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
@@ -75,7 +75,7 @@ async fn run_query(connection: &str, sql: &str) -> Result<()> {
         url,
         read_only: entry.read_only,
     };
-    let driver = MySqlDriver::connect(&conn_cfg)
+    let driver = sqldr_core::connect(&conn_cfg)
         .await
         .with_context(|| format!("connecting to '{connection}'"))?;
 

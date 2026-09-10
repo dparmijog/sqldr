@@ -2,7 +2,7 @@
 //! through a previously-run query.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use sqldr_core::{Driver, ForeignKey};
+use sqldr_core::ForeignKey;
 
 use super::{App, ConnStatus, StatusMessage, TablesState};
 

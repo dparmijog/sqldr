@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
-use sqldr_core::{History, MySqlDriver, Row, Schema, Table};
+use sqldr_core::{Driver, History, Row, Schema, Table};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
@@ -57,7 +57,7 @@ impl Focus {
 pub enum ConnStatus {
     Idle,
     Connecting,
-    Connected(Arc<MySqlDriver>),
+    Connected(Arc<dyn Driver>),
     Error(String),
 }
 
@@ -395,7 +395,7 @@ pub enum AppEvent {
     /// flight.
     TablesLoaded(usize, String, Vec<Table>),
     TablesError(usize, String, String),
-    Connected(usize, Arc<MySqlDriver>),
+    Connected(usize, Arc<dyn Driver>),
     ConnectError(usize, String),
     /// Result of testing credentials in the "add connection" wizard: the
     /// request id (see [`ConnWizard::request_id`]) and either the server's

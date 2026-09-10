@@ -11,7 +11,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
-use sqldr_core::Driver;
 
 use crate::app::{App, ConnStatus, Focus};
 use crate::sql_highlight;

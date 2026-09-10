@@ -4,7 +4,6 @@
 //! open, matching the wizard's other static-list pickers.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use sqldr_core::Driver;
 use tui_textarea::CursorMove;
 
 use super::{App, ConnStatus, Overlay, StatusMessage, TablesState};

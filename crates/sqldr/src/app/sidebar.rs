@@ -4,7 +4,6 @@
 //! is open, rather than one search mixing both scopes.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use sqldr_core::Driver;
 
 use crate::favorites::DbRef;
 

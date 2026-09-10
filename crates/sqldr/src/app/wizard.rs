@@ -2,7 +2,7 @@
 //! test → pick database.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sqldr_core::{ConnConfig, Driver, MySqlDriver};
+use sqldr_core::ConnConfig;
 
 use super::{App, AppEvent, ConnField, ConnState, ConnWizard, Engine, Focus, Overlay, StatusMessage, WizardStep};
 
@@ -180,7 +180,7 @@ impl App {
         let cfg = ConnConfig { name, url: url.to_string(), read_only: wizard.read_only };
         let tx = self.events.clone();
         tokio::spawn(async move {
-            let result = match MySqlDriver::connect(&cfg).await {
+            let result = match sqldr_core::connect(&cfg).await {
                 Ok(driver) => driver.list_databases().await.map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             };
