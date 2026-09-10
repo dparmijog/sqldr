@@ -12,6 +12,7 @@ pub(crate) mod query;
 pub(crate) mod results;
 mod settings;
 pub(crate) mod sidebar;
+mod tasks;
 pub(crate) mod wizard;
 
 use std::collections::HashMap;

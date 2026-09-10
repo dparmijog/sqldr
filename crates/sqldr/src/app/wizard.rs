@@ -322,14 +322,15 @@ impl App {
         wizard.request_id = request_id;
 
         let cfg = ConnConfig { name, url: url.to_string(), read_only: wizard.read_only };
-        let tx = self.events.clone();
-        tokio::spawn(async move {
-            let result = match sqldr_core::connect(&cfg).await {
-                Ok(driver) => driver.list_databases().await.map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
-            };
-            let _ = tx.send(AppEvent::WizardTested(request_id, result));
-        });
+        self.spawn_into_event(
+            async move {
+                match sqldr_core::connect(&cfg).await {
+                    Ok(driver) => driver.list_databases().await.map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            },
+            move |result| AppEvent::WizardTested(request_id, result),
+        );
         Some(wizard)
     }
 

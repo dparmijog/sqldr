@@ -9,6 +9,7 @@ use sqldr_core::{is_mutating, needs_where_confirmation, ConnConfig, Driver, Hist
 use tokio_util::sync::CancellationToken;
 
 use super::results::{PageState, ResultsState};
+use super::tasks;
 use super::{App, AppEvent, ConnStatus, Overlay, StatusMessage};
 
 /// A pending SQL statement queued in the history picker, ready to load into
@@ -76,14 +77,7 @@ impl App {
         let tx = self.events.clone();
         tokio::spawn(async move {
             match driver.explain(&sql).await {
-                Ok(plan) => {
-                    for row in plan.rows {
-                        if tx.send(AppEvent::QueryRow(row)).is_err() {
-                            return;
-                        }
-                    }
-                    let _ = tx.send(AppEvent::QueryDone);
-                }
+                Ok(plan) => tasks::pump_rows(&tx, futures::stream::iter(plan.rows.into_iter().map(Ok))).await,
                 Err(e) => {
                     let _ = tx.send(AppEvent::QueryError(e.to_string()));
                 }
@@ -258,26 +252,8 @@ impl App {
 
         let tx = self.events.clone();
         tokio::spawn(async move {
-            use futures::StreamExt;
-            let mut stream = driver.query(&exec_sql, cancel);
-            let mut sent_err = false;
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(row) => {
-                        if tx.send(AppEvent::QueryRow(row)).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(AppEvent::QueryError(e.to_string()));
-                        sent_err = true;
-                        break;
-                    }
-                }
-            }
-            if !sent_err {
-                let _ = tx.send(AppEvent::QueryDone);
-            }
+            let stream = driver.query(&exec_sql, cancel);
+            tasks::pump_rows(&tx, stream).await;
         });
     }
 
@@ -296,17 +272,14 @@ impl App {
     pub(super) fn load_tables_for(&mut self, ci: usize, db_name: String) {
         let ConnStatus::Connected(driver) = &self.conns[ci].status else { return };
         let driver = Arc::clone(driver);
-        let tx = self.events.clone();
-        tokio::spawn(async move {
-            match driver.tables(&db_name).await {
-                Ok(tables) => {
-                    let _ = tx.send(AppEvent::TablesLoaded(ci, db_name, tables));
-                }
-                Err(e) => {
-                    let _ = tx.send(AppEvent::TablesError(ci, db_name, e.to_string()));
-                }
-            }
-        });
+        let db_name_for_fetch = db_name.clone();
+        self.spawn_into_event(
+            async move { driver.tables(&db_name_for_fetch).await.map_err(|e| e.to_string()) },
+            move |result| match result {
+                Ok(tables) => AppEvent::TablesLoaded(ci, db_name, tables),
+                Err(e) => AppEvent::TablesError(ci, db_name, e),
+            },
+        );
     }
 
     pub(super) fn connect_and_load_schema(&mut self, ci: usize) {
