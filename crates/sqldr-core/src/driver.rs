@@ -7,6 +7,28 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
+/// Structured connection-failure classification. Every `Driver` method
+/// besides `connect` still returns a plain `anyhow::Result` — connect is
+/// the one place where distinguishing *why* a connection failed (wrong
+/// password vs. server unreachable vs. typo'd database name) is
+/// genuinely actionable for a caller, and its `Display` text (used by
+/// every existing `.to_string()` call site in the TUI) is already an
+/// improvement over the raw driver error even for callers that never
+/// match on the variant.
+#[derive(Debug, thiserror::Error)]
+pub enum DriverError {
+    #[error("authentication failed: {0}")]
+    AuthFailed(String),
+    #[error("could not reach the server: {0}")]
+    ConnectionRefused(String),
+    #[error("unknown database: {0}")]
+    UnknownDatabase(String),
+    #[error("unsupported connection scheme '{0}' (only mysql is supported today)")]
+    UnsupportedScheme(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 /// Connection parameters for a single named connection (as read from config).
 #[derive(Debug, Clone)]
 pub struct ConnConfig {
@@ -110,7 +132,7 @@ pub trait Dialect: Send + Sync {
 /// which engine is underneath.
 #[async_trait]
 pub trait Driver: Send + Sync {
-    async fn connect(cfg: &ConnConfig) -> anyhow::Result<Self>
+    async fn connect(cfg: &ConnConfig) -> Result<Self, DriverError>
     where
         Self: Sized;
 

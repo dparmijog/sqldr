@@ -6,7 +6,7 @@ use sqlx::mysql::{MySqlPool, MySqlRow};
 use sqlx::{Column as _, Row as _, TypeInfo as _};
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::{Column, ConnConfig, Dialect, Driver, ForeignKey, Plan, Row, Schema, Table, Value};
+use crate::driver::{Column, ConnConfig, Dialect, Driver, DriverError, ForeignKey, Plan, Row, Schema, Table, Value};
 
 pub struct MySqlDialect;
 
@@ -151,8 +151,8 @@ fn text_col(row: &MySqlRow, idx: usize) -> anyhow::Result<String> {
 
 #[async_trait]
 impl Driver for MySqlDriver {
-    async fn connect(cfg: &ConnConfig) -> anyhow::Result<Self> {
-        let pool = MySqlPool::connect(&cfg.url).await?;
+    async fn connect(cfg: &ConnConfig) -> Result<Self, DriverError> {
+        let pool = MySqlPool::connect(&cfg.url).await.map_err(classify_connect_error)?;
         Ok(MySqlDriver { pool, dialect: MySqlDialect })
     }
 
@@ -292,4 +292,74 @@ async fn list_database_names(pool: &MySqlPool) -> anyhow::Result<Vec<String>> {
     .fetch_all(pool)
     .await?;
     db_rows.iter().map(|r| text_col(r, 0)).collect()
+}
+
+/// Maps a `sqlx::Error` from a failed connection attempt to a
+/// [`DriverError`], so callers can eventually branch on *why* it failed.
+/// Database-protocol errors are classified by MySQL's own numeric error
+/// code (`err.number()`, e.g. 1045) via [`classify_mysql_error_code`];
+/// transport-level failures (refused/timed-out/DNS) surface as
+/// `sqlx::Error::Io`/`PoolTimedOut` and map to `ConnectionRefused`.
+fn classify_connect_error(e: sqlx::Error) -> DriverError {
+    match &e {
+        sqlx::Error::Database(db_err) => {
+            match db_err.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>() {
+                Some(mysql_err) => classify_mysql_error_code(mysql_err.number(), mysql_err.message()),
+                None => DriverError::Other(anyhow::anyhow!(db_err.message().to_string())),
+            }
+        }
+        sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut => {
+            DriverError::ConnectionRefused(e.to_string())
+        }
+        _ => DriverError::Other(anyhow::anyhow!(e.to_string())),
+    }
+}
+
+/// Pure classification by MySQL's numeric error code — kept separate from
+/// [`classify_connect_error`] specifically so it's testable without a
+/// live server (constructing a real `sqlx::Error::Database` requires an
+/// actual protocol round-trip).
+fn classify_mysql_error_code(number: u16, message: &str) -> DriverError {
+    match number {
+        // ER_DBACCESS_DENIED_ERROR, ER_ACCESS_DENIED_ERROR
+        1044 | 1045 => DriverError::AuthFailed(message.to_string()),
+        // ER_BAD_DB_ERROR
+        1049 => DriverError::UnknownDatabase(message.to_string()),
+        _ => DriverError::Other(anyhow::anyhow!("{message}")),
+    }
+}
+
+#[cfg(test)]
+mod connect_error_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_access_denied_as_auth_failed() {
+        let err = classify_mysql_error_code(1045, "Access denied for user 'x'@'y'");
+        assert!(matches!(err, DriverError::AuthFailed(_)), "1045 must classify as AuthFailed");
+    }
+
+    #[test]
+    fn classifies_db_access_denied_as_auth_failed() {
+        let err = classify_mysql_error_code(1044, "Access denied for user to database 'x'");
+        assert!(matches!(err, DriverError::AuthFailed(_)), "1044 must classify as AuthFailed");
+    }
+
+    #[test]
+    fn classifies_unknown_database() {
+        let err = classify_mysql_error_code(1049, "Unknown database 'x'");
+        assert!(matches!(err, DriverError::UnknownDatabase(_)), "1049 must classify as UnknownDatabase");
+    }
+
+    #[test]
+    fn classifies_unrecognized_codes_as_other() {
+        let err = classify_mysql_error_code(9999, "some other error");
+        assert!(matches!(err, DriverError::Other(_)));
+    }
+
+    #[test]
+    fn display_text_is_actionable() {
+        let err = classify_mysql_error_code(1045, "Access denied for user 'x'@'y'");
+        assert_eq!(err.to_string(), "authentication failed: Access denied for user 'x'@'y'");
+    }
 }

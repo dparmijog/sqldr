@@ -8,7 +8,7 @@ pub use history::{History, HistoryEntry};
 pub use pagination::{paginate, DEFAULT_PAGE_SIZE};
 
 pub use driver::{
-    Column, ConnConfig, Dialect, Driver, ForeignKey, Plan, Row, Schema, Table, Value,
+    Column, ConnConfig, Dialect, Driver, DriverError, ForeignKey, Plan, Row, Schema, Table, Value,
 };
 pub use mysql::MySqlDriver;
 
@@ -18,10 +18,24 @@ pub use mysql::MySqlDriver;
 /// this instead of naming a concrete driver type directly, so adding an
 /// engine means adding one match arm here, not hunting down every
 /// `MySqlDriver::connect` call site across the TUI crate.
-pub async fn connect(cfg: &ConnConfig) -> anyhow::Result<std::sync::Arc<dyn Driver>> {
+pub async fn connect(cfg: &ConnConfig) -> Result<std::sync::Arc<dyn Driver>, DriverError> {
     let scheme = cfg.url.split("://").next().unwrap_or("");
     match scheme {
         "mysql" => Ok(std::sync::Arc::new(MySqlDriver::connect(cfg).await?)),
-        other => anyhow::bail!("unsupported connection scheme '{other}' (only mysql is supported today)"),
+        other => Err(DriverError::UnsupportedScheme(other.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_rejects_an_unsupported_scheme_before_ever_dialing_out() {
+        let cfg = ConnConfig { name: "x".into(), url: "postgres://localhost/db".into(), read_only: false };
+        match connect(&cfg).await {
+            Ok(_) => panic!("an unsupported scheme must never connect"),
+            Err(err) => assert!(matches!(err, DriverError::UnsupportedScheme(s) if s == "postgres")),
+        }
     }
 }
