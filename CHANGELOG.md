@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.3.0] - 2026-09-09
+
+### Añadido
+- **Resaltado de sintaxis SQL en el editor**, consciente del dialecto de
+  la conexión activa: keywords, strings, números y comentarios `--` con
+  colores propios por tema (los 5 temas existentes ganan 4 colores
+  semánticos nuevos, tomados de la paleta oficial de cada uno donde
+  existe: Dracula, Nord, Catppuccin Mocha, Gruvbox). Se enciende recién
+  al conectar, porque el vocabulario de keywords viene del `Dialect` de
+  la conexión — MySQL hoy, pero diseñado para que un futuro Postgres/
+  SQLite resalte con su propio vocabulario sin tocar la UI.
+- **Autocompletado en el editor** (`Ctrl+Space` / `F7`): popup con
+  keywords del dialecto + nombres de tabla/columna del tab abierto,
+  filtrados por el prefijo bajo el cursor. `↑`/`↓` para elegir,
+  `Enter`/`Tab` para insertar, `Esc` para cancelar.
+- `sqldr-core`: `Dialect::keywords()` — el punto de extensión modular
+  que alimenta tanto el resaltado como el autocompletado; MySQL
+  implementa un vocabulario DML/DDL/DQL razonablemente completo.
+- `sql_highlight.rs`: tokenizer de SQL agnóstico de dialecto (strings,
+  números, comentarios `--`, clasificación de keywords/identificadores),
+  compartido por ambas features nuevas. 7 tests unitarios.
+
+### Corregido
+- **Bug real encontrado en vivo**: el tokenizer escaneaba bytes crudos y
+  casteaba bytes de continuación UTF-8 a `char` directamente, causando
+  un panic con cualquier carácter acentuado o multi-byte (tildes, "ñ",
+  etc.) apenas se activara el resaltado. Reescrito para iterar con
+  `char_indices()`.
+- **Bug real encontrado en vivo**: el primer diseño guardaba un offset
+  de scroll del editor persistido entre renders para imitar el
+  viewport interno de `tui_textarea` — pero `sqldr` renderiza un
+  `app.editor.clone()` nuevo en cada frame, y solo el viewport de ese
+  clon descartable se actualiza (el de `app.editor` nunca avanza de su
+  `(0,0)` inicial). El resaltado ahora calcula el scroll real
+  (siempre partiendo de cero) en vez de confiar en un valor persistido
+  que no reflejaba lo que realmente se dibujaba en pantalla.
+
+---
+
 ## [1.2.0] - 2026-09-09
 
 ### Añadido
@@ -51,56 +90,6 @@
 - Se agregó `F6` como fallback sin modificador para `EXPLAIN` (mismo
   patrón que `Ctrl+Enter`/`F5` ya usa para ejecutar), para terminales/
   multiplexores que no reenvíen `Ctrl+<letra>` de forma confiable.
-
----
-
-## [1.0.0]
-
-Primera versión estable: TUI + CLI funcional para administrar bases MySQL,
-con editor SQL, navegación de esquema, historial de queries, wizard de
-conexión y guardrails de seguridad para DML sin `WHERE`.
-
-### Añadido
-- Workspace Rust (`sqldr-core` + `sqldr`), trait `Driver` y backend MySQL
-  sobre `sqlx`, con decodificación de tipos (enteros con/sin signo, floats,
-  `DECIMAL`, texto, `DATE`/`TIME`/`DATETIME`/`TIMESTAMP`, `BOOLEAN`,
-  binarios) y consultas cancelables.
-- CLI mínima: `sqldr query -c <conn> "<sql>"` imprime resultados en tabla ASCII.
-- Fix de decodificación: `BIT` como `u64` (no bytes crudos) y reconocimiento
-  correcto de tipos de la familia `TEXT`.
-- TUI completa con layout de tres paneles (sidebar / editor / resultados),
-  event loop, navegación del árbol de conexiones/esquema y guardrails.
-- Historial de queries por conexión (`Ctrl+R`), edición en `$EDITOR` externo
-  (`Ctrl+E`), confirmación obligatoria para DML sin `WHERE`, y copiar
-  celda/fila (JSON, CSV, `INSERT`) vía OSC 52.
-- `$EDITOR` tokenizado shell-style (soporta `"code --wait"`, `"vim -u NONE"`, etc.).
-- El historial de queries por CLI solo se registra si la conexión tuvo éxito,
-  igual que en la TUI.
-- Soporte de mouse: click para enfocar/seleccionar paneles, arrastrar para
-  redimensionar sidebar y editor.
-- Wizard de conexión (`Ctrl+N`): selección de motor → credenciales → test
-  en vivo contra el servidor → selección de base de datos real (en vez de
-  tipear el nombre a ciegas).
-- Fix: un resultado de test de conexión obsoleto (`WizardTested`) ya no
-  pisaba overlays no relacionados; se agregaron tests de regresión.
-- Fix de scroll del sidebar (se mueve relativo al cursor) y búsqueda de
-  tablas con `/`.
-- Tabs por base de datos seleccionada en el sidebar; paginación automática
-  (`LIMIT 500` + `PgUp`/`PgDn`).
-- Fix de detección de `LIMIT` en paginación: ahora es consciente de la
-  profundidad de paréntesis (ignora `LIMIT` dentro de subqueries).
-- El editor se sincroniza para mostrar el SQL exacto que se ejecutó
-  (incluyendo el `LIMIT`/`OFFSET` automático), y se actualiza con la
-  paginación.
-- Si se borra el `LIMIT` agregado automáticamente y se vuelve a ejecutar,
-  la query corre sin límite (se respeta la intención explícita del usuario).
-- README con instrucciones de build, configuración, uso y mapa de teclas.
-
-### Quitado
-- `START_HERE.md` (documento de scaffolding inicial), reemplazado por `README.md`.
-
-### Versión
-- Bump de ambos crates a `1.0.0`, se expone la flag `--version`.
 
 ---
 
@@ -157,3 +146,53 @@ conexión y guardrails de seguridad para DML sin `WHERE`.
   español al inglés.
 - Se quitó una referencia colgante a `START_HERE.md` (archivo ya eliminado)
   en un comentario de documentación de `clipboard.rs`.
+
+---
+
+## [1.0.0]
+
+Primera versión estable: TUI + CLI funcional para administrar bases MySQL,
+con editor SQL, navegación de esquema, historial de queries, wizard de
+conexión y guardrails de seguridad para DML sin `WHERE`.
+
+### Añadido
+- Workspace Rust (`sqldr-core` + `sqldr`), trait `Driver` y backend MySQL
+  sobre `sqlx`, con decodificación de tipos (enteros con/sin signo, floats,
+  `DECIMAL`, texto, `DATE`/`TIME`/`DATETIME`/`TIMESTAMP`, `BOOLEAN`,
+  binarios) y consultas cancelables.
+- CLI mínima: `sqldr query -c <conn> "<sql>"` imprime resultados en tabla ASCII.
+- Fix de decodificación: `BIT` como `u64` (no bytes crudos) y reconocimiento
+  correcto de tipos de la familia `TEXT`.
+- TUI completa con layout de tres paneles (sidebar / editor / resultados),
+  event loop, navegación del árbol de conexiones/esquema y guardrails.
+- Historial de queries por conexión (`Ctrl+R`), edición en `$EDITOR` externo
+  (`Ctrl+E`), confirmación obligatoria para DML sin `WHERE`, y copiar
+  celda/fila (JSON, CSV, `INSERT`) vía OSC 52.
+- `$EDITOR` tokenizado shell-style (soporta `"code --wait"`, `"vim -u NONE"`, etc.).
+- El historial de queries por CLI solo se registra si la conexión tuvo éxito,
+  igual que en la TUI.
+- Soporte de mouse: click para enfocar/seleccionar paneles, arrastrar para
+  redimensionar sidebar y editor.
+- Wizard de conexión (`Ctrl+N`): selección de motor → credenciales → test
+  en vivo contra el servidor → selección de base de datos real (en vez de
+  tipear el nombre a ciegas).
+- Fix: un resultado de test de conexión obsoleto (`WizardTested`) ya no
+  pisaba overlays no relacionados; se agregaron tests de regresión.
+- Fix de scroll del sidebar (se mueve relativo al cursor) y búsqueda de
+  tablas con `/`.
+- Tabs por base de datos seleccionada en el sidebar; paginación automática
+  (`LIMIT 500` + `PgUp`/`PgDn`).
+- Fix de detección de `LIMIT` en paginación: ahora es consciente de la
+  profundidad de paréntesis (ignora `LIMIT` dentro de subqueries).
+- El editor se sincroniza para mostrar el SQL exacto que se ejecutó
+  (incluyendo el `LIMIT`/`OFFSET` automático), y se actualiza con la
+  paginación.
+- Si se borra el `LIMIT` agregado automáticamente y se vuelve a ejecutar,
+  la query corre sin límite (se respeta la intención explícita del usuario).
+- README con instrucciones de build, configuración, uso y mapa de teclas.
+
+### Quitado
+- `START_HERE.md` (documento de scaffolding inicial), reemplazado por `README.md`.
+
+### Versión
+- Bump de ambos crates a `1.0.0`, se expone la flag `--version`.
