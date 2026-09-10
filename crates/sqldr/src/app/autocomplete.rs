@@ -67,6 +67,9 @@ impl App {
         });
     }
 
+    /// Returns the `(candidates, selected)` to keep the popup open with,
+    /// or `None` to close it — `anchor`/`replace_len` never change after
+    /// opening, so the caller (`on_overlay_key`) keeps holding those.
     pub(super) fn on_autocomplete_key(
         &mut self,
         candidates: Vec<String>,
@@ -74,16 +77,16 @@ impl App {
         anchor: (usize, usize),
         replace_len: usize,
         key: KeyEvent,
-    ) {
+    ) -> Option<(Vec<String>, usize)> {
         match key.code {
-            KeyCode::Esc => {}
+            KeyCode::Esc => None,
             KeyCode::Up => {
                 selected = selected.saturating_sub(1);
-                self.overlay = Some(Overlay::Autocomplete { candidates, selected, anchor, replace_len });
+                Some((candidates, selected))
             }
             KeyCode::Down => {
                 selected = (selected + 1).min(candidates.len().saturating_sub(1));
-                self.overlay = Some(Overlay::Autocomplete { candidates, selected, anchor, replace_len });
+                Some((candidates, selected))
             }
             KeyCode::Enter | KeyCode::Tab => {
                 if let Some(choice) = candidates.get(selected) {
@@ -91,10 +94,9 @@ impl App {
                     self.editor.delete_str(replace_len);
                     self.editor.insert_str(choice);
                 }
+                None
             }
-            _ => {
-                self.overlay = Some(Overlay::Autocomplete { candidates, selected, anchor, replace_len });
-            }
+            _ => Some((candidates, selected)),
         }
     }
 }

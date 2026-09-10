@@ -13,104 +13,103 @@ fn next_wizard_request_id() -> u64 {
 }
 
 impl App {
-    pub(super) fn on_wizard_key(&mut self, mut wizard: ConnWizard, key: KeyEvent) {
+    /// Returns the (possibly updated) wizard to keep the overlay open
+    /// with, or `None` to close it — `start_connection_test`/
+    /// `finalize_connection` follow the same contract.
+    pub(super) fn on_wizard_key(&mut self, mut wizard: ConnWizard, key: KeyEvent) -> Option<ConnWizard> {
         let step = wizard.step.clone();
         match step {
             WizardStep::SelectEngine { selected } => match key.code {
                 KeyCode::Esc => {
                     self.status = StatusMessage::Info("cancelled".into());
+                    None
                 }
                 KeyCode::Up => {
                     wizard.step = WizardStep::SelectEngine { selected: selected.saturating_sub(1) };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 KeyCode::Down => {
                     let selected = (selected + 1).min(Engine::ALL.len() - 1);
                     wizard.step = WizardStep::SelectEngine { selected };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 KeyCode::Enter => {
                     wizard.engine = Engine::ALL[selected];
                     wizard.port = wizard.engine.default_port().to_string();
                     wizard.step = WizardStep::Details;
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
-                _ => {
-                    self.overlay = Some(Overlay::AddConnection(wizard));
-                }
+                _ => Some(wizard),
             },
             WizardStep::Details => match (key.code, key.modifiers) {
                 (KeyCode::Esc, _) => {
                     wizard.error = None;
                     wizard.step = WizardStep::SelectEngine { selected: 0 };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
-                (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-                    self.start_connection_test(wizard);
-                }
+                (KeyCode::Char('s'), KeyModifiers::CONTROL) => self.start_connection_test(wizard),
                 (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::Down, _) => {
                     wizard.field = wizard.field.next();
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
                     wizard.field = wizard.field.prev();
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 (KeyCode::Char(' '), _) | (KeyCode::Enter, _) if wizard.field == ConnField::ReadOnly => {
                     wizard.read_only = !wizard.read_only;
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 (KeyCode::Enter, _) => {
                     wizard.field = wizard.field.next();
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 (KeyCode::Backspace, _) => {
                     let field = wizard.field;
                     if let Some(s) = wizard.field_mut(field) {
                         s.pop();
                     }
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 (KeyCode::Char(c), _) => {
                     let field = wizard.field;
                     if let Some(s) = wizard.field_mut(field) {
                         s.push(c);
                     }
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
-                _ => {
-                    self.overlay = Some(Overlay::AddConnection(wizard));
-                }
+                _ => Some(wizard),
             },
             WizardStep::Testing => {
                 if key.code == KeyCode::Esc {
                     wizard.step = WizardStep::Details;
                 }
-                self.overlay = Some(Overlay::AddConnection(wizard));
+                Some(wizard)
             }
             WizardStep::SelectDatabase { databases, selected } => match key.code {
                 KeyCode::Esc => {
                     wizard.step = WizardStep::Details;
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 KeyCode::Up => {
                     wizard.step =
                         WizardStep::SelectDatabase { databases, selected: selected.saturating_sub(1) };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 KeyCode::Down => {
                     // Index 0 is the synthetic "no database" option.
                     let selected = (selected + 1).min(databases.len());
                     wizard.step = WizardStep::SelectDatabase { databases, selected };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
                 KeyCode::Enter => {
                     let database = if selected == 0 { None } else { databases.get(selected - 1).cloned() };
                     self.finalize_connection(wizard, database);
+                    None
                 }
                 _ => {
                     wizard.step = WizardStep::SelectDatabase { databases, selected };
-                    self.overlay = Some(Overlay::AddConnection(wizard));
+                    Some(wizard)
                 }
             },
         }
@@ -120,17 +119,15 @@ impl App {
     /// against the real server in the background (connecting without a
     /// default database) so the next step can offer a live list of
     /// databases to pick from.
-    fn start_connection_test(&mut self, mut wizard: ConnWizard) {
+    fn start_connection_test(&mut self, mut wizard: ConnWizard) -> Option<ConnWizard> {
         let name = wizard.name.trim().to_string();
         if name.is_empty() {
             wizard.error = Some("name is required".into());
-            self.overlay = Some(Overlay::AddConnection(wizard));
-            return;
+            return Some(wizard);
         }
         if self.conns.iter().enumerate().any(|(i, c)| c.entry.name == name && Some(i) != wizard.edit_target) {
             wizard.error = Some(format!("a connection named '{name}' already exists"));
-            self.overlay = Some(Overlay::AddConnection(wizard));
-            return;
+            return Some(wizard);
         }
         let host = if wizard.host.trim().is_empty() { "127.0.0.1" } else { wizard.host.trim() }.to_string();
         let port_str = if wizard.port.trim().is_empty() {
@@ -140,8 +137,7 @@ impl App {
         };
         let Ok(port) = port_str.parse::<u16>() else {
             wizard.error = Some(format!("invalid port: '{port_str}'"));
-            self.overlay = Some(Overlay::AddConnection(wizard));
-            return;
+            return Some(wizard);
         };
         let user = wizard.user.trim().to_string();
 
@@ -149,8 +145,7 @@ impl App {
             Ok(u) => u,
             Err(e) => {
                 wizard.error = Some(format!("invalid host/port: {e}"));
-                self.overlay = Some(Overlay::AddConnection(wizard));
-                return;
+                return Some(wizard);
             }
         };
         if !user.is_empty() {
@@ -186,7 +181,7 @@ impl App {
             };
             let _ = tx.send(AppEvent::WizardTested(request_id, result));
         });
-        self.overlay = Some(Overlay::AddConnection(wizard));
+        Some(wizard)
     }
 
     /// Builds the final connection URL (host/port/user/database — no

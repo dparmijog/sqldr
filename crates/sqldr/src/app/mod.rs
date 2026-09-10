@@ -576,12 +576,20 @@ impl App {
 
     fn on_overlay_key(&mut self, key: KeyEvent) {
         match self.overlay.take() {
-            Some(Overlay::History(picker)) => self.on_history_key(picker, key),
+            Some(Overlay::History(picker)) => {
+                self.overlay = self.on_history_key(picker, key).map(Overlay::History);
+            }
             Some(Overlay::Confirm { sql, source_table, record_history, .. }) => {
                 self.on_confirm_key(sql, source_table, record_history, key)
             }
-            Some(Overlay::AddConnection(wizard)) => self.on_wizard_key(wizard, key),
-            Some(Overlay::Settings { selected, original }) => self.on_settings_key(selected, original, key),
+            Some(Overlay::AddConnection(wizard)) => {
+                self.overlay = self.on_wizard_key(wizard, key).map(Overlay::AddConnection);
+            }
+            Some(Overlay::Settings { selected, original }) => {
+                self.overlay = self
+                    .on_settings_key(selected, original, key)
+                    .map(|(selected, original)| Overlay::Settings { selected, original });
+            }
             Some(Overlay::ConfirmDeleteConnection { conn_idx, name }) => {
                 self.on_confirm_delete_key(conn_idx, name, key)
             }
@@ -590,7 +598,9 @@ impl App {
                 // removed from `self.overlay` by `.take()` above.
             }
             Some(Overlay::Autocomplete { candidates, selected, anchor, replace_len }) => {
-                self.on_autocomplete_key(candidates, selected, anchor, replace_len, key)
+                self.overlay = self
+                    .on_autocomplete_key(candidates, selected, anchor, replace_len, key)
+                    .map(|(candidates, selected)| Overlay::Autocomplete { candidates, selected, anchor, replace_len });
             }
             None => {}
         }

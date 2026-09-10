@@ -102,39 +102,44 @@ impl App {
         }
     }
 
-    pub(super) fn on_history_key(&mut self, mut picker: HistoryPicker, key: crossterm::event::KeyEvent) {
+    /// Returns the (possibly updated) picker to keep the overlay open
+    /// with, or `None` to close it.
+    pub(super) fn on_history_key(
+        &mut self,
+        mut picker: HistoryPicker,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<HistoryPicker> {
         match key.code {
-            KeyCode::Esc => {}
+            KeyCode::Esc => None,
             KeyCode::Enter => {
                 if let Some(sql) = picker.filtered().get(picker.selected).map(|s| s.to_string()) {
                     self.set_editor_sql(&sql);
                     self.focus = super::Focus::Editor;
                 }
+                None
             }
             KeyCode::Up => {
                 picker.selected = picker.selected.saturating_sub(1);
-                self.overlay = Some(Overlay::History(picker));
+                Some(picker)
             }
             KeyCode::Down => {
                 let len = picker.filtered().len();
                 if len > 0 {
                     picker.selected = (picker.selected + 1).min(len - 1);
                 }
-                self.overlay = Some(Overlay::History(picker));
+                Some(picker)
             }
             KeyCode::Backspace => {
                 picker.filter.pop();
                 picker.selected = 0;
-                self.overlay = Some(Overlay::History(picker));
+                Some(picker)
             }
             KeyCode::Char(c) => {
                 picker.filter.push(c);
                 picker.selected = 0;
-                self.overlay = Some(Overlay::History(picker));
+                Some(picker)
             }
-            _ => {
-                self.overlay = Some(Overlay::History(picker));
-            }
+            _ => Some(picker),
         }
     }
 
