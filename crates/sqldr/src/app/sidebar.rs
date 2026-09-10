@@ -4,10 +4,42 @@
 //! is open, rather than one search mixing both scopes.
 
 use crossterm::event::{KeyCode, KeyEvent};
+use sqldr_core::Table;
 
 use crate::favorites::DbRef;
 
-use super::{App, ConnStatus, DbTab, SidebarNode, StatusMessage, TablesState};
+use super::{App, ConnStatus, StatusMessage};
+
+/// A flattened, renderable row of the sidebar's top-level tree
+/// (connections and their databases only — tables live inside a
+/// [`DbTab`], opened by selecting a database).
+#[derive(Clone, Copy)]
+pub enum SidebarNode {
+    /// A user-starred database, indexing `App::favorites.favorites`.
+    Favorite(usize),
+    Connection(usize),
+    Database(usize, usize),
+}
+
+/// Lazily-loaded table list for an open [`DbTab`]. Kept separate from the
+/// connection's [`Schema`] (database names only) so opening one database
+/// never pays for walking every table in every other database on the
+/// same server.
+pub enum TablesState {
+    Loading,
+    Loaded(Vec<Table>),
+    Error(String),
+}
+
+/// An open "use this database" tab: selecting a database in the
+/// connection tree opens (or switches to) one of these, and the sidebar
+/// then shows that database's tables instead of the tree.
+pub struct DbTab {
+    pub conn_idx: usize,
+    pub db_idx: usize,
+    pub db_name: String,
+    pub tables: TablesState,
+}
 
 impl App {
     /// Flattens the sidebar tree according to current expand state, so

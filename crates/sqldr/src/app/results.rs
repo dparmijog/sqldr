@@ -2,9 +2,57 @@
 //! through a previously-run query.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use sqldr_core::ForeignKey;
+use sqldr_core::{ForeignKey, Row};
 
-use super::{App, ConnStatus, StatusMessage, TablesState};
+use super::sidebar::TablesState;
+use super::{App, ConnStatus, StatusMessage};
+
+/// Result of the most recent query run, shown in the results pane.
+pub struct ResultsState {
+    pub rows: Vec<Row>,
+    pub cols: Vec<String>,
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    /// Top row currently visible; kept in sync with `cursor_row` by the
+    /// results renderer so the selection never scrolls off-screen.
+    pub scroll_top: usize,
+    pub running: bool,
+    /// `(database, table)` this result set was previewed from, if any.
+    /// Enables "copy row as INSERT" (needs a concrete target table).
+    pub source_table: Option<(String, String)>,
+    /// Present when this result set can be paged further/back — absent
+    /// when the query wasn't a plain read or already had its own `LIMIT`.
+    pub pagination: Option<PageState>,
+    /// Per-column display width, grown to fit the widest value seen so
+    /// far (header included) as rows stream in — gives the results table
+    /// a real grid look instead of one flat `Min` width for every column.
+    pub col_widths: Vec<u16>,
+}
+
+/// Tracks the un-paginated SQL and current page for a paginated result set,
+/// so `PageUp`/`PageDown` can rebuild the query for the next/previous page.
+#[derive(Clone)]
+pub struct PageState {
+    pub base_sql: String,
+    pub page: usize,
+    pub page_size: u64,
+}
+
+impl Default for ResultsState {
+    fn default() -> Self {
+        ResultsState {
+            rows: Vec::new(),
+            cols: Vec::new(),
+            cursor_row: 0,
+            cursor_col: 0,
+            scroll_top: 0,
+            running: false,
+            source_table: None,
+            pagination: None,
+            col_widths: Vec::new(),
+        }
+    }
+}
 
 enum RowFormat {
     Json,

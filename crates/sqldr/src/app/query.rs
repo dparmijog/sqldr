@@ -8,7 +8,30 @@ use crossterm::event::KeyCode;
 use sqldr_core::{is_mutating, needs_where_confirmation, ConnConfig, Driver, History};
 use tokio_util::sync::CancellationToken;
 
-use super::{App, AppEvent, ConnStatus, HistoryPicker, Overlay, PageState, ResultsState, StatusMessage};
+use super::results::{PageState, ResultsState};
+use super::{App, AppEvent, ConnStatus, Overlay, StatusMessage};
+
+/// A pending SQL statement queued in the history picker, ready to load into
+/// the editor.
+pub struct HistoryPicker {
+    /// All entries for the active connection, most recent last (as stored).
+    pub items: Vec<String>,
+    pub filter: String,
+    pub selected: usize,
+}
+
+impl HistoryPicker {
+    /// Entries matching the current filter, most-recent-first.
+    pub fn filtered(&self) -> Vec<&str> {
+        let needle = self.filter.to_ascii_lowercase();
+        self.items
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .filter(|sql| needle.is_empty() || sql.to_ascii_lowercase().contains(&needle))
+            .collect()
+    }
+}
 
 impl App {
     pub(super) fn run_editor_query(&mut self) {

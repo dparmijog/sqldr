@@ -8,11 +8,11 @@
 
 mod autocomplete;
 mod mouse;
-mod query;
-mod results;
+pub(crate) mod query;
+pub(crate) mod results;
 mod settings;
-mod sidebar;
-mod wizard;
+pub(crate) mod sidebar;
+pub(crate) mod wizard;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,6 +26,11 @@ use tui_textarea::TextArea;
 use crate::config::{ConnEntry, Config};
 use crate::favorites::{DbRef, Favorites};
 use crate::theme::Theme;
+
+use query::HistoryPicker;
+use results::ResultsState;
+use sidebar::{DbTab, TablesState};
+use wizard::{ConnWizard, WizardStep};
 
 /// Which pane currently receives key input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,260 +96,12 @@ impl ConnState {
     }
 }
 
-/// A flattened, renderable row of the sidebar's top-level tree
-/// (connections and their databases only — tables live inside a
-/// [`DbTab`], opened by selecting a database).
-#[derive(Clone, Copy)]
-pub enum SidebarNode {
-    /// A user-starred database, indexing `App::favorites.favorites`.
-    Favorite(usize),
-    Connection(usize),
-    Database(usize, usize),
-}
-
-/// Lazily-loaded table list for an open [`DbTab`]. Kept separate from the
-/// connection's [`Schema`] (database names only) so opening one database
-/// never pays for walking every table in every other database on the
-/// same server.
-pub enum TablesState {
-    Loading,
-    Loaded(Vec<Table>),
-    Error(String),
-}
-
-/// An open "use this database" tab: selecting a database in the
-/// connection tree opens (or switches to) one of these, and the sidebar
-/// then shows that database's tables instead of the tree.
-pub struct DbTab {
-    pub conn_idx: usize,
-    pub db_idx: usize,
-    pub db_name: String,
-    pub tables: TablesState,
-}
-
-/// Result of the most recent query run, shown in the results pane.
-pub struct ResultsState {
-    pub rows: Vec<Row>,
-    pub cols: Vec<String>,
-    pub cursor_row: usize,
-    pub cursor_col: usize,
-    /// Top row currently visible; kept in sync with `cursor_row` by the
-    /// results renderer so the selection never scrolls off-screen.
-    pub scroll_top: usize,
-    pub running: bool,
-    /// `(database, table)` this result set was previewed from, if any.
-    /// Enables "copy row as INSERT" (needs a concrete target table).
-    pub source_table: Option<(String, String)>,
-    /// Present when this result set can be paged further/back — absent
-    /// when the query wasn't a plain read or already had its own `LIMIT`.
-    pub pagination: Option<PageState>,
-    /// Per-column display width, grown to fit the widest value seen so
-    /// far (header included) as rows stream in — gives the results table
-    /// a real grid look instead of one flat `Min` width for every column.
-    pub col_widths: Vec<u16>,
-}
-
-/// Tracks the un-paginated SQL and current page for a paginated result set,
-/// so `PageUp`/`PageDown` can rebuild the query for the next/previous page.
-#[derive(Clone)]
-pub struct PageState {
-    pub base_sql: String,
-    pub page: usize,
-    pub page_size: u64,
-}
-
-impl Default for ResultsState {
-    fn default() -> Self {
-        ResultsState {
-            rows: Vec::new(),
-            cols: Vec::new(),
-            cursor_row: 0,
-            cursor_col: 0,
-            scroll_top: 0,
-            running: false,
-            source_table: None,
-            pagination: None,
-            col_widths: Vec::new(),
-        }
-    }
-}
-
 /// Status-bar line: active connection, running/error state, read-only flag.
 pub enum StatusMessage {
     Idle,
     Running,
     Error(String),
     Info(String),
-}
-
-/// A pending SQL statement queued in the history picker, ready to load into
-/// the editor.
-pub struct HistoryPicker {
-    /// All entries for the active connection, most recent last (as stored).
-    pub items: Vec<String>,
-    pub filter: String,
-    pub selected: usize,
-}
-
-impl HistoryPicker {
-    /// Entries matching the current filter, most-recent-first.
-    pub fn filtered(&self) -> Vec<&str> {
-        let needle = self.filter.to_ascii_lowercase();
-        self.items
-            .iter()
-            .rev()
-            .map(String::as_str)
-            .filter(|sql| needle.is_empty() || sql.to_ascii_lowercase().contains(&needle))
-            .collect()
-    }
-}
-
-/// Database engine offered by the "add connection" wizard. Only MySQL is
-/// implemented today; the roadmap adds Postgres and SQLite as more
-/// `Driver` impls land, at which point they join `Engine::ALL`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Engine {
-    MySql,
-}
-
-impl Engine {
-    pub const ALL: [Engine; 1] = [Engine::MySql];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Engine::MySql => "MySQL",
-        }
-    }
-
-    pub fn default_port(self) -> u16 {
-        match self {
-            Engine::MySql => 3306,
-        }
-    }
-}
-
-/// Which field of the connection-details form currently has input focus.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ConnField {
-    Name,
-    Host,
-    Port,
-    User,
-    Password,
-    ReadOnly,
-}
-
-impl ConnField {
-    const ORDER: [ConnField; 6] = [
-        ConnField::Name,
-        ConnField::Host,
-        ConnField::Port,
-        ConnField::User,
-        ConnField::Password,
-        ConnField::ReadOnly,
-    ];
-
-    fn next(self) -> Self {
-        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ORDER[(idx + 1) % Self::ORDER.len()]
-    }
-
-    fn prev(self) -> Self {
-        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()]
-    }
-}
-
-/// Where the "add connection" wizard currently is. Mirrors the flow the
-/// user asked for: pick an engine, fill in host/credentials, test them
-/// live against the server, then pick a database from what's actually
-/// there — rather than typing a database name blind.
-#[derive(Clone)]
-pub enum WizardStep {
-    SelectEngine { selected: usize },
-    Details,
-    Testing,
-    SelectDatabase { databases: Vec<String>, selected: usize },
-}
-
-/// Form state for the "add connection" modal (`Ctrl+N`).
-pub struct ConnWizard {
-    pub step: WizardStep,
-    pub engine: Engine,
-    pub name: String,
-    pub host: String,
-    pub port: String,
-    pub user: String,
-    pub password: String,
-    pub read_only: bool,
-    pub field: ConnField,
-    pub error: Option<String>,
-    /// Identifies which background connection test this wizard is waiting
-    /// on, so a stale result (e.g. after the user cancelled and reopened
-    /// the wizard) is silently dropped instead of clobbering fresh state.
-    request_id: u64,
-    /// `Some(idx)` when this wizard is editing the connection at `conns[idx]`
-    /// (opened via `e` on a connection node) rather than adding a new one;
-    /// `finalize_connection` replaces that entry in place instead of
-    /// pushing a new one.
-    edit_target: Option<usize>,
-}
-
-impl ConnWizard {
-    fn new() -> Self {
-        let engine = Engine::ALL[0];
-        ConnWizard {
-            step: WizardStep::SelectEngine { selected: 0 },
-            engine,
-            name: String::new(),
-            host: "127.0.0.1".to_string(),
-            port: engine.default_port().to_string(),
-            user: String::new(),
-            password: String::new(),
-            read_only: false,
-            field: ConnField::Name,
-            error: None,
-            request_id: 0,
-            edit_target: None,
-        }
-    }
-
-    /// Pre-fills the details step from an existing connection's URL
-    /// (host/port/user; the password field is left blank — leaving it
-    /// blank on save keeps whatever is already stored in the keyring).
-    /// Skips the engine picker since only one engine exists to pick from.
-    fn for_edit(idx: usize, entry: &crate::config::ConnEntry) -> Self {
-        let engine = Engine::ALL[0];
-        let parsed = url::Url::parse(&entry.url).ok();
-        let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("127.0.0.1").to_string();
-        let port = parsed.as_ref().and_then(|u| u.port()).unwrap_or(engine.default_port()).to_string();
-        let user = parsed.as_ref().map(|u| u.username().to_string()).unwrap_or_default();
-        ConnWizard {
-            step: WizardStep::Details,
-            engine,
-            name: entry.name.clone(),
-            host,
-            port,
-            user,
-            password: String::new(),
-            read_only: entry.read_only,
-            field: ConnField::Name,
-            error: None,
-            request_id: 0,
-            edit_target: Some(idx),
-        }
-    }
-
-    fn field_mut(&mut self, field: ConnField) -> Option<&mut String> {
-        match field {
-            ConnField::Name => Some(&mut self.name),
-            ConnField::Host => Some(&mut self.host),
-            ConnField::Port => Some(&mut self.port),
-            ConnField::User => Some(&mut self.user),
-            ConnField::Password => Some(&mut self.password),
-            ConnField::ReadOnly => None,
-        }
-    }
 }
 
 /// A modal that intercepts all key input until resolved.
@@ -714,6 +471,8 @@ fn point_in(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sidebar::SidebarNode;
+    use wizard::{ConnField, Engine};
 
     fn test_app() -> App {
         let (tx, _rx) = mpsc::unbounded_channel();

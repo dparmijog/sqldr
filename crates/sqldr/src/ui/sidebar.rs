@@ -8,7 +8,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 
-use crate::app::{App, ConnStatus, Focus, SidebarNode, TablesState};
+use crate::app::sidebar::{SidebarNode, TablesState};
+use crate::app::{App, ConnStatus, Focus};
 use crate::favorites::DbRef;
 
 pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {

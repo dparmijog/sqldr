@@ -6,7 +6,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use tui_textarea::CursorMove;
 
-use super::{App, ConnStatus, Overlay, StatusMessage, TablesState};
+use super::sidebar::TablesState;
+use super::{App, ConnStatus, Overlay, StatusMessage};
 
 impl App {
     pub(super) fn open_autocomplete(&mut self) {

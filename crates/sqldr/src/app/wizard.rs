@@ -4,7 +4,156 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sqldr_core::ConnConfig;
 
-use super::{App, AppEvent, ConnField, ConnState, ConnWizard, Engine, Focus, Overlay, StatusMessage, WizardStep};
+use super::sidebar::SidebarNode;
+use super::{App, AppEvent, ConnState, Focus, Overlay, StatusMessage};
+
+/// Database engine offered by the "add connection" wizard. Only MySQL is
+/// implemented today; the roadmap adds Postgres and SQLite as more
+/// `Driver` impls land, at which point they join `Engine::ALL`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    MySql,
+}
+
+impl Engine {
+    pub const ALL: [Engine; 1] = [Engine::MySql];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Engine::MySql => "MySQL",
+        }
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::MySql => 3306,
+        }
+    }
+}
+
+/// Which field of the connection-details form currently has input focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConnField {
+    Name,
+    Host,
+    Port,
+    User,
+    Password,
+    ReadOnly,
+}
+
+impl ConnField {
+    const ORDER: [ConnField; 6] = [
+        ConnField::Name,
+        ConnField::Host,
+        ConnField::Port,
+        ConnField::User,
+        ConnField::Password,
+        ConnField::ReadOnly,
+    ];
+
+    fn next(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let idx = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
+        Self::ORDER[(idx + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+}
+
+/// Where the "add connection" wizard currently is. Mirrors the flow the
+/// user asked for: pick an engine, fill in host/credentials, test them
+/// live against the server, then pick a database from what's actually
+/// there — rather than typing a database name blind.
+#[derive(Clone)]
+pub enum WizardStep {
+    SelectEngine { selected: usize },
+    Details,
+    Testing,
+    SelectDatabase { databases: Vec<String>, selected: usize },
+}
+
+/// Form state for the "add connection" modal (`Ctrl+N`).
+pub struct ConnWizard {
+    pub step: WizardStep,
+    pub engine: Engine,
+    pub name: String,
+    pub host: String,
+    pub port: String,
+    pub user: String,
+    pub password: String,
+    pub read_only: bool,
+    pub field: ConnField,
+    pub error: Option<String>,
+    /// Identifies which background connection test this wizard is waiting
+    /// on, so a stale result (e.g. after the user cancelled and reopened
+    /// the wizard) is silently dropped instead of clobbering fresh state.
+    pub(super) request_id: u64,
+    /// `Some(idx)` when this wizard is editing the connection at `conns[idx]`
+    /// (opened via `e` on a connection node) rather than adding a new one;
+    /// `finalize_connection` replaces that entry in place instead of
+    /// pushing a new one.
+    edit_target: Option<usize>,
+}
+
+impl ConnWizard {
+    pub(super) fn new() -> Self {
+        let engine = Engine::ALL[0];
+        ConnWizard {
+            step: WizardStep::SelectEngine { selected: 0 },
+            engine,
+            name: String::new(),
+            host: "127.0.0.1".to_string(),
+            port: engine.default_port().to_string(),
+            user: String::new(),
+            password: String::new(),
+            read_only: false,
+            field: ConnField::Name,
+            error: None,
+            request_id: 0,
+            edit_target: None,
+        }
+    }
+
+    /// Pre-fills the details step from an existing connection's URL
+    /// (host/port/user; the password field is left blank — leaving it
+    /// blank on save keeps whatever is already stored in the keyring).
+    /// Skips the engine picker since only one engine exists to pick from.
+    fn for_edit(idx: usize, entry: &crate::config::ConnEntry) -> Self {
+        let engine = Engine::ALL[0];
+        let parsed = url::Url::parse(&entry.url).ok();
+        let host = parsed.as_ref().and_then(|u| u.host_str()).unwrap_or("127.0.0.1").to_string();
+        let port = parsed.as_ref().and_then(|u| u.port()).unwrap_or(engine.default_port()).to_string();
+        let user = parsed.as_ref().map(|u| u.username().to_string()).unwrap_or_default();
+        ConnWizard {
+            step: WizardStep::Details,
+            engine,
+            name: entry.name.clone(),
+            host,
+            port,
+            user,
+            password: String::new(),
+            read_only: entry.read_only,
+            field: ConnField::Name,
+            error: None,
+            request_id: 0,
+            edit_target: Some(idx),
+        }
+    }
+
+    fn field_mut(&mut self, field: ConnField) -> Option<&mut String> {
+        match field {
+            ConnField::Name => Some(&mut self.name),
+            ConnField::Host => Some(&mut self.host),
+            ConnField::Port => Some(&mut self.port),
+            ConnField::User => Some(&mut self.user),
+            ConnField::Password => Some(&mut self.password),
+            ConnField::ReadOnly => None,
+        }
+    }
+}
 
 static NEXT_WIZARD_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -267,7 +416,7 @@ impl App {
     /// a favorite/database row doesn't make sense here.
     pub(super) fn edit_selected_connection(&mut self) {
         let nodes = self.sidebar_nodes();
-        let Some(super::SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
+        let Some(SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
             return;
         };
         let entry = self.conns[ci].entry.clone();
@@ -278,7 +427,7 @@ impl App {
     /// sidebar cursor. No-op on any other node.
     pub(super) fn request_delete_selected_connection(&mut self) {
         let nodes = self.sidebar_nodes();
-        let Some(super::SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
+        let Some(SidebarNode::Connection(ci)) = nodes.get(self.sidebar_cursor).copied() else {
             return;
         };
         let name = self.conns[ci].entry.name.clone();

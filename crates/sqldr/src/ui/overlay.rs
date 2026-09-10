@@ -10,7 +10,8 @@ use ratatui::Frame;
 
 use sqldr_core::Table;
 
-use crate::app::{App, ConnField, ConnWizard, Engine, Overlay, WizardStep};
+use crate::app::wizard::{ConnField, ConnWizard, Engine, WizardStep};
+use crate::app::{App, Overlay};
 use crate::theme::Theme;
 
 fn centered(width: u16, height_pct: u16, area: Rect) -> Rect {
@@ -43,7 +44,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-fn render_history(frame: &mut Frame, theme: Theme, picker: &crate::app::HistoryPicker) {
+fn render_history(frame: &mut Frame, theme: Theme, picker: &crate::app::query::HistoryPicker) {
     let area = centered(90, 70, frame.area());
     frame.render_widget(Clear, area);
 
