@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.3.1] - 2026-09-10
+
+Sin cambios funcionales para el usuario — release de mantenimiento
+interno: cero features nuevas, cero bugs corregidos. Bump de patch por
+convención semver (refactors internos sin cambio de comportamiento
+observable).
+
+### Interno
+- **`Arc<dyn Driver>` en vez de `Arc<MySqlDriver>`** en toda la TUI/CLI:
+  desacopla el código de app del motor concreto, desbloqueando Postgres/
+  SQLite el día que un segundo `Driver` exista, sin tocar ningún
+  call-site adicional.
+- **Taxonomía de errores de conexión** (`DriverError` con `thiserror`):
+  clasifica fallos reales de MySQL (auth, base desconocida, conexión
+  rechazada/timeout, esquema no soportado) en vez de propagar un
+  `anyhow::Error` opaco — mejora mensajes de error de forma automática
+  en CLI/TUI sin tocar esas piezas.
+- **Overlays via `Option<T>` de retorno** en vez de mutar `self.overlay`
+  a mano en cada handler: elimina el patrón `self.overlay = Some(...)`
+  repetido en las ~35 ramas de teclas de los 4 modales (historial,
+  settings, wizard, autocompletado).
+- **Helpers `spawn_into_event`/`pump_rows`** (`app/tasks.rs`): reducen
+  la duplicación de "clonar el sender de eventos, spawnear, mandar
+  evento de éxito/error" en 4 de los 6 sitios que la compartían de
+  verdad (test de credenciales del wizard, carga de tablas, query en
+  vivo, `EXPLAIN`). Los otros 2 (cadena multi-paso de conexión+esquema,
+  loop infinito de heartbeat) se dejaron sin tocar a propósito: su
+  control de flujo no encaja en un helper genérico.
+- **God Object de `App` dividido en dos fases**:
+  - Fase 1: 9 tipos de dominio (`HistoryPicker`, `ResultsState`,
+    `SidebarNode`/`TablesState`/`DbTab`, `Engine`/`ConnField`/
+    `WizardStep`/`ConnWizard`) relocados desde `mod.rs` a los módulos
+    que ya los usaban en la práctica.
+  - Fase 2: los 21 campos de `App` separados en `ConnectionsState`
+    (conexiones, tabs, favoritos, historial) y `QueryState` (editor,
+    resultados, cancelación), dejando plano solo lo genuinamente de UI
+    (foco, cursores, overlay, tema, layout).
+
+---
+
 ## [1.3.0] - 2026-09-09
 
 ### Añadido
