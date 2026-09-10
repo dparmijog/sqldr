@@ -19,7 +19,28 @@ impl Dialect for MySqlDialect {
         let trimmed = sql.trim_end().trim_end_matches(';');
         format!("{trimmed} LIMIT {n}")
     }
+
+    fn keywords(&self) -> &'static [&'static str] {
+        MYSQL_KEYWORDS
+    }
 }
+
+/// MySQL's reserved-word vocabulary for the editor's syntax highlighting
+/// and autocomplete — not exhaustive (MySQL has hundreds of reserved
+/// words across versions), but covers everyday DML/DDL/DQL vocabulary.
+const MYSQL_KEYWORDS: &[&str] = &[
+    "SELECT", "FROM", "WHERE", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "AS", "DISTINCT",
+    "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "CROSS", "ON", "USING", "UNION", "ALL", "EXISTS",
+    "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END",
+    "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "REPLACE",
+    "CREATE", "ALTER", "DROP", "TABLE", "DATABASE", "SCHEMA", "INDEX", "VIEW", "TRIGGER", "PROCEDURE",
+    "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "CONSTRAINT", "UNIQUE", "DEFAULT", "AUTO_INCREMENT",
+    "CASCADE", "RESTRICT", "CHECK", "NOT NULL",
+    "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "DECIMAL", "FLOAT", "DOUBLE", "BOOLEAN",
+    "CHAR", "VARCHAR", "TEXT", "BLOB", "DATE", "TIME", "DATETIME", "TIMESTAMP", "JSON", "ENUM",
+    "EXPLAIN", "DESC", "ASC", "WITH", "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION",
+    "SHOW", "DESCRIBE", "GRANT", "REVOKE",
+];
 
 pub struct MySqlDriver {
     pool: MySqlPool,

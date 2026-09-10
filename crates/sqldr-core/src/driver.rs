@@ -94,10 +94,16 @@ pub struct Plan {
 
 /// SQL-dialect-specific string building. Kept minimal on purpose: only what
 /// the TUI/CLI actually needs today (identifier quoting, previewing a
-/// `LIMIT`).
+/// `LIMIT`, and a reserved-word vocabulary for the editor's syntax
+/// highlighting/autocomplete — each engine has its own).
 pub trait Dialect: Send + Sync {
     fn quote_ident(&self, s: &str) -> String;
     fn limit(&self, sql: &str, n: u64) -> String;
+    /// Reserved words this dialect recognizes, uppercase. Used by the TUI
+    /// to classify tokens for syntax highlighting and to offer as
+    /// autocomplete candidates — never sent to the server, purely a
+    /// presentation-layer vocabulary.
+    fn keywords(&self) -> &'static [&'static str];
 }
 
 /// Backend contract. The TUI only ever talks to this trait; it never knows

@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod config;
 mod favorites;
+mod sql_highlight;
 mod theme;
 mod tui;
 mod ui;

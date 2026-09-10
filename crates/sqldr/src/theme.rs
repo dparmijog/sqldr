@@ -1,8 +1,9 @@
 //! Color palettes for the TUI. A [`Theme`] only carries the handful of
 //! semantic roles the UI actually uses (focused borders/selections, muted
-//! chrome, and the running/error/success status colors) — never raw
-//! per-widget colors — so every pane and overlay repaints consistently the
-//! moment the user switches themes in the options dialog (`Ctrl+O`).
+//! chrome, the running/error/success status colors, and SQL syntax
+//! token colors) — never raw per-widget colors — so every pane and
+//! overlay repaints consistently the moment the user switches themes in
+//! the options dialog (`Ctrl+O`).
 
 use ratatui::style::Color;
 
@@ -16,6 +17,14 @@ pub struct Theme {
     pub error: Color,
     pub warning: Color,
     pub success: Color,
+    /// Editor syntax highlighting — reserved words (SELECT, FROM, ...).
+    pub sql_keyword: Color,
+    /// Editor syntax highlighting — string literals.
+    pub sql_string: Color,
+    /// Editor syntax highlighting — numeric literals.
+    pub sql_number: Color,
+    /// Editor syntax highlighting — `--` line comments.
+    pub sql_comment: Color,
 }
 
 const DARK: Theme = Theme {
@@ -25,6 +34,10 @@ const DARK: Theme = Theme {
     error: Color::Red,
     warning: Color::Yellow,
     success: Color::Green,
+    sql_keyword: Color::Magenta,
+    sql_string: Color::Green,
+    sql_number: Color::Blue,
+    sql_comment: Color::DarkGray,
 };
 
 const DRACULA: Theme = Theme {
@@ -34,6 +47,12 @@ const DRACULA: Theme = Theme {
     error: Color::Rgb(0xff, 0x55, 0x55),
     warning: Color::Rgb(0xf1, 0xfa, 0x8c),
     success: Color::Rgb(0x50, 0xfa, 0x7b),
+    // Official Dracula spec: Pink for keywords, Yellow for strings,
+    // Purple for numbers, Comment gray for comments.
+    sql_keyword: Color::Rgb(0xff, 0x79, 0xc6),
+    sql_string: Color::Rgb(0xf1, 0xfa, 0x8c),
+    sql_number: Color::Rgb(0xbd, 0x93, 0xf9),
+    sql_comment: Color::Rgb(0x62, 0x72, 0xa4),
 };
 
 const NORD: Theme = Theme {
@@ -43,6 +62,13 @@ const NORD: Theme = Theme {
     error: Color::Rgb(0xbf, 0x61, 0x6a),
     warning: Color::Rgb(0xeb, 0xcb, 0x8b),
     success: Color::Rgb(0xa3, 0xbe, 0x8c),
+    // Official Nord spec: nord9 (frost blue) for keywords, nord14 (aurora
+    // green) for strings, nord15 (aurora purple) for numbers, nord3 for
+    // comments.
+    sql_keyword: Color::Rgb(0x81, 0xa1, 0xc1),
+    sql_string: Color::Rgb(0xa3, 0xbe, 0x8c),
+    sql_number: Color::Rgb(0xb4, 0x8e, 0xad),
+    sql_comment: Color::Rgb(0x4c, 0x56, 0x6a),
 };
 
 const CATPPUCCIN_MOCHA: Theme = Theme {
@@ -52,6 +78,12 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
     error: Color::Rgb(0xf3, 0x8b, 0xa8),
     warning: Color::Rgb(0xf9, 0xe2, 0xaf),
     success: Color::Rgb(0xa6, 0xe3, 0xa1),
+    // Official Catppuccin Mocha spec: Blue for keywords, Green for
+    // strings, Peach for numbers, Overlay0 for comments.
+    sql_keyword: Color::Rgb(0x89, 0xb4, 0xfa),
+    sql_string: Color::Rgb(0xa6, 0xe3, 0xa1),
+    sql_number: Color::Rgb(0xfa, 0xb3, 0x87),
+    sql_comment: Color::Rgb(0x6c, 0x70, 0x86),
 };
 
 const GRUVBOX_DARK: Theme = Theme {
@@ -61,6 +93,12 @@ const GRUVBOX_DARK: Theme = Theme {
     error: Color::Rgb(0xfb, 0x49, 0x34),
     warning: Color::Rgb(0xfa, 0xbd, 0x2f),
     success: Color::Rgb(0xb8, 0xbb, 0x26),
+    // Official Gruvbox spec: bright purple for keywords, bright green for
+    // strings, bright orange for numbers, gray for comments.
+    sql_keyword: Color::Rgb(0xd3, 0x86, 0x9b),
+    sql_string: Color::Rgb(0xb8, 0xbb, 0x26),
+    sql_number: Color::Rgb(0xfe, 0x80, 0x19),
+    sql_comment: Color::Rgb(0x92, 0x83, 0x74),
 };
 
 impl Theme {
